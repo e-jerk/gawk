@@ -1,0 +1,305 @@
+const std = @import("std");
+
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+
+    const is_macos = target.result.os.tag == .macos;
+    const is_native = target.result.os.tag == @import("builtin").os.tag;
+
+    // Build options to pass compile-time config to source
+    const build_options = b.addOptions();
+    build_options.addOption(bool, "is_macos", is_macos);
+    const build_options_module = build_options.createModule();
+
+    // e_jerk_gpu library for GPU detection and auto-selection (also provides zigtrait)
+    const e_jerk_gpu_dep = b.dependency("e_jerk_gpu", .{});
+    const e_jerk_gpu_module = e_jerk_gpu_dep.module("e_jerk_gpu");
+    const zigtrait_module = e_jerk_gpu_dep.module("zigtrait");
+
+    // zig-metal dependency
+    const zig_metal_dep = b.dependency("zig_metal", .{});
+    const zig_metal_module = b.addModule("zig-metal", .{
+        .root_source_file = zig_metal_dep.path("src/main.zig"),
+        .imports = &.{
+            .{ .name = "zigtrait", .module = zigtrait_module },
+        },
+    });
+
+    // Vulkan dependencies
+    const vulkan_headers = b.dependency("vulkan_headers", .{});
+    const vulkan_dep = b.dependency("vulkan_zig", .{
+        .registry = vulkan_headers.path("registry/vk.xml"),
+    });
+    const vulkan_module = vulkan_dep.module("vulkan-zig");
+
+    // Shared shader library
+    const shaders_common = b.dependency("shaders_common", .{});
+
+    // Compile SPIR-V shader from GLSL for Vulkan
+    const spirv_compile = b.addSystemCommand(&.{
+        "glslc",
+        "--target-env=vulkan1.2",
+        "-O",
+    });
+    // Add include path for shared GLSL headers
+    spirv_compile.addArg("-I");
+    spirv_compile.addDirectoryArg(shaders_common.path("glsl"));
+    spirv_compile.addArg("-o");
+    const spirv_output = spirv_compile.addOutputFileArg("awk.spv");
+    spirv_compile.addFileArg(b.path("src/shaders/awk.comp"));
+
+    // Create embedded SPIR-V module
+    const spirv_module = b.addModule("spirv", .{
+        .root_source_file = b.addWriteFiles().add("spirv.zig",
+            \\pub const EMBEDDED_SPIRV = @embedFile("awk.spv");
+        ),
+    });
+    spirv_module.addAnonymousImport("awk.spv", .{ .root_source_file = spirv_output });
+
+    // Preprocess Metal shader to inline the string_ops.h include
+    // Concatenates: header + shader (with include line removed)
+    const metal_preprocess = b.addSystemCommand(&.{
+        "/bin/sh", "-c",
+        \\cat "$1" && grep -v '#include "string_ops.h"' "$2"
+        , "--",
+    });
+    metal_preprocess.addFileArg(shaders_common.path("metal/string_ops.h"));
+    metal_preprocess.addFileArg(b.path("src/shaders/awk.metal"));
+    const preprocessed_metal = metal_preprocess.captureStdOut();
+
+    // Create embedded Metal shader module
+    const metal_module = b.addModule("metal_shader", .{
+        .root_source_file = b.addWriteFiles().add("metal_shader.zig",
+            \\pub const EMBEDDED_METAL_SHADER = @embedFile("awk.metal");
+        ),
+    });
+    metal_module.addAnonymousImport("awk.metal", .{ .root_source_file = preprocessed_metal });
+
+    // Create gpu module for reuse
+    const gpu_module = b.addModule("gpu", .{
+        .root_source_file = b.path("src/gpu/mod.zig"),
+        .imports = &.{
+            .{ .name = "zig-metal", .module = zig_metal_module },
+            .{ .name = "build_options", .module = build_options_module },
+            .{ .name = "vulkan", .module = vulkan_module },
+            .{ .name = "spirv", .module = spirv_module },
+            .{ .name = "metal_shader", .module = metal_module },
+            .{ .name = "e_jerk_gpu", .module = e_jerk_gpu_module },
+        },
+    });
+
+    // Create cpu module for reuse
+    const cpu_module = b.addModule("cpu", .{
+        .root_source_file = b.path("src/cpu.zig"),
+        .imports = &.{
+            .{ .name = "gpu", .module = gpu_module },
+        },
+    });
+
+    // Main executable
+    const exe = b.addExecutable(.{
+        .name = "gawk",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zig-metal", .module = zig_metal_module },
+                .{ .name = "build_options", .module = build_options_module },
+                .{ .name = "vulkan", .module = vulkan_module },
+                .{ .name = "spirv", .module = spirv_module },
+                .{ .name = "gpu", .module = gpu_module },
+                .{ .name = "cpu", .module = cpu_module },
+            },
+        }),
+    });
+
+    // Platform-specific linking
+    if (is_macos) {
+        if (is_native) {
+            exe.linkFramework("Foundation");
+            exe.linkFramework("Metal");
+            exe.linkFramework("QuartzCore");
+
+            // MoltenVK from Homebrew for Vulkan on macOS
+            exe.root_module.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/molten-vk/lib" });
+            exe.linkSystemLibrary("MoltenVK");
+        }
+    } else {
+        if (is_native) {
+            exe.linkSystemLibrary("vulkan");
+        }
+    }
+
+    b.installArtifact(exe);
+
+    // Run step
+    const run_cmd = b.addRunArtifact(exe);
+    run_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_cmd.addArgs(args);
+    }
+
+    const run_step = b.step("run", "Run gawk");
+    run_step.dependOn(&run_cmd.step);
+
+    // Benchmark executable
+    const bench_exe = b.addExecutable(.{
+        .name = "gawk-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("benchmarks/bench.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "zig-metal", .module = zig_metal_module },
+                .{ .name = "build_options", .module = build_options_module },
+                .{ .name = "vulkan", .module = vulkan_module },
+                .{ .name = "spirv", .module = spirv_module },
+                .{ .name = "gpu", .module = gpu_module },
+                .{ .name = "cpu", .module = cpu_module },
+            },
+        }),
+    });
+
+    if (is_macos) {
+        if (is_native) {
+            bench_exe.linkFramework("Foundation");
+            bench_exe.linkFramework("Metal");
+            bench_exe.linkFramework("QuartzCore");
+            bench_exe.root_module.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/molten-vk/lib" });
+            bench_exe.linkSystemLibrary("MoltenVK");
+        }
+    } else {
+        if (is_native) {
+            bench_exe.linkSystemLibrary("vulkan");
+        }
+    }
+
+    b.installArtifact(bench_exe);
+
+    const bench_cmd = b.addRunArtifact(bench_exe);
+    bench_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        bench_cmd.addArgs(args);
+    }
+
+    const bench_step = b.step("bench", "Run benchmarks");
+    bench_step.dependOn(&bench_cmd.step);
+
+    // Smoke tests executable
+    const smoke_exe = b.addExecutable(.{
+        .name = "gawk-smoke",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/smoke_tests.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "zig-metal", .module = zig_metal_module },
+                .{ .name = "build_options", .module = build_options_module },
+                .{ .name = "vulkan", .module = vulkan_module },
+                .{ .name = "spirv", .module = spirv_module },
+                .{ .name = "gpu", .module = gpu_module },
+                .{ .name = "cpu", .module = cpu_module },
+            },
+        }),
+    });
+
+    if (is_macos) {
+        if (is_native) {
+            smoke_exe.linkFramework("Foundation");
+            smoke_exe.linkFramework("Metal");
+            smoke_exe.linkFramework("QuartzCore");
+            smoke_exe.root_module.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/molten-vk/lib" });
+            smoke_exe.linkSystemLibrary("MoltenVK");
+        }
+    } else {
+        if (is_native) {
+            smoke_exe.linkSystemLibrary("vulkan");
+        }
+    }
+
+    b.installArtifact(smoke_exe);
+
+    const smoke_cmd = b.addRunArtifact(smoke_exe);
+    smoke_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        smoke_cmd.addArgs(args);
+    }
+
+    const smoke_step = b.step("smoke", "Run smoke tests");
+    smoke_step.dependOn(&smoke_cmd.step);
+
+    // Tests
+    const unit_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zig-metal", .module = zig_metal_module },
+                .{ .name = "build_options", .module = build_options_module },
+                .{ .name = "vulkan", .module = vulkan_module },
+                .{ .name = "spirv", .module = spirv_module },
+                .{ .name = "gpu", .module = gpu_module },
+                .{ .name = "cpu", .module = cpu_module },
+            },
+        }),
+    });
+
+    if (is_macos and is_native) {
+        unit_tests.linkFramework("Foundation");
+        unit_tests.linkFramework("Metal");
+        unit_tests.linkFramework("QuartzCore");
+        unit_tests.root_module.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/molten-vk/lib" });
+        unit_tests.linkSystemLibrary("MoltenVK");
+    }
+
+    // Unit tests from tests/unit_tests.zig
+    const extra_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/unit_tests.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zig-metal", .module = zig_metal_module },
+                .{ .name = "build_options", .module = build_options_module },
+                .{ .name = "vulkan", .module = vulkan_module },
+                .{ .name = "spirv", .module = spirv_module },
+                .{ .name = "gpu", .module = gpu_module },
+                .{ .name = "cpu", .module = cpu_module },
+            },
+        }),
+    });
+
+    if (is_macos and is_native) {
+        extra_tests.linkFramework("Foundation");
+        extra_tests.linkFramework("Metal");
+        extra_tests.linkFramework("QuartzCore");
+        extra_tests.root_module.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/molten-vk/lib" });
+        extra_tests.linkSystemLibrary("MoltenVK");
+    }
+
+    // Metal shader compilation check (macOS only)
+    if (is_macos) {
+        const write_shader = b.addWriteFiles();
+        _ = write_shader.addCopyFile(preprocessed_metal, "awk_check.metal");
+
+        const metal_compile_check = b.addSystemCommand(&.{
+            "xcrun", "-sdk", "macosx", "metal",
+            "-Werror",
+            "-c",
+        });
+        metal_compile_check.addFileArg(write_shader.getDirectory().path(b, "awk_check.metal"));
+        metal_compile_check.addArg("-o");
+        _ = metal_compile_check.addOutputFileArg("awk.air");
+
+        extra_tests.step.dependOn(&metal_compile_check.step);
+    }
+
+    const run_unit_tests = b.addRunArtifact(unit_tests);
+    const run_extra_tests = b.addRunArtifact(extra_tests);
+    const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&run_unit_tests.step);
+    test_step.dependOn(&run_extra_tests.step);
+}

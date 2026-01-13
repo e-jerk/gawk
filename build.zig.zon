@@ -1,0 +1,42 @@
+.{
+    .name = .gawk,
+    .version = "0.1.0",
+    .fingerprint = 0x74bee65053b127a9,
+    .minimum_zig_version = "0.15.2",
+
+    .dependencies = .{
+        // Shared shader library
+        .shaders_common = .{
+            .url = "git+https://github.com/e-jerk/shaders-common#v0.1.0",
+            .hash = "shaders_common-0.1.0-dZ7wZ3kqAABTaMaUORx_Ezk1jtplGb5o0eCAlNQwAjng",
+        },
+        // GPU detection and auto-selection library
+        .e_jerk_gpu = .{
+            .url = "git+https://github.com/e-jerk/gpu#v0.1.0",
+            .hash = "e_jerk_gpu-0.1.0-FyPePJLqAAAgxAo6-HcdPgAsQdxgJCQfuoqoco1-By9U",
+        },
+        // Metal bindings for Zig
+        .zig_metal = .{
+            .url = "git+https://github.com/binoculars/zig-metal#main",
+            .hash = "N-V-__8AAPisPgBOnobLBlpfNHrw9K83kxf1I1S98aQ5-A1c",
+        },
+        // Vulkan bindings for Zig
+        .vulkan_zig = .{
+            .url = "git+https://github.com/Snektron/vulkan-zig?ref=zig-0.15-compat#1446b0b994c2362264cc24513d7c7ec31b469c50",
+            .hash = "vulkan-0.0.0-r7Ytx_VDAwAiMl0YSu2UOkVMIGJN7CeIQaxJR-hUSfD6",
+        },
+        // Vulkan headers for XML registry
+        .vulkan_headers = .{
+            .url = "git+https://github.com/KhronosGroup/Vulkan-Headers#0777a3ad88bad5f4b11cfd509458bbc0ddadc773",
+            .hash = "N-V-__8AAMZuLQIcPe--JSv0kn_Ga8tsjgbkaojW0OHW2Rfd",
+        },
+    },
+
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "benchmarks",
+        "tests",
+    },
+}

@@ -1,0 +1,205 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// GPU-Accelerated AWK Operations (Vulkan/GLSL)
+// Optimized with vector types for SIMD operations
+
+#include "string_ops.glsl"
+
+const uint FLAG_CASE_INSENSITIVE = 1u;
+const uint FLAG_INVERT_MATCH = 32u;
+
+struct AwkConfig {
+    uint text_len;
+    uint pattern_len;
+    uint field_sep_len;
+    uint num_fields_requested;
+    uint flags;
+    uint max_results;
+    uint max_fields;
+    uint replacement_len;
+};
+
+struct AwkMatchResult {
+    uint line_start;
+    uint line_end;
+    uint match_start;
+    uint match_end;
+    uint line_num;
+    uint field_count;
+    uint _pad1;
+    uint _pad2;
+};
+
+struct FieldInfo {
+    uint line_idx;
+    uint field_idx;
+    uint start_offset;
+    uint end_offset;
+};
+
+// Buffer bindings
+layout(std430, binding = 0) readonly buffer TextBuffer { uint text_data[]; };
+layout(std430, binding = 1) readonly buffer PatternBuffer { uint pattern_data[]; };
+layout(std430, binding = 2) readonly buffer SkipTableBuffer { uint skip_table_data[64]; };
+layout(std430, binding = 3) readonly buffer ConfigBuffer { AwkConfig config; };
+layout(std430, binding = 4) writeonly buffer ResultBuffer { AwkMatchResult results[]; };
+layout(std430, binding = 5) buffer CounterBuffer { uint match_count; uint field_count; };
+layout(std430, binding = 6) readonly buffer LineOffsetsBuffer { uint line_offsets[]; };
+layout(std430, binding = 7) readonly buffer LineLengthsBuffer { uint line_lengths[]; };
+
+// Buffer access functions (specific to this shader's buffer layout)
+
+// Get single byte from packed uint32 buffer
+uint get_byte(uint pos, bool from_pattern) {
+    uint word_idx = pos >> 2u;
+    uint byte_idx = pos & 3u;
+    uint word = from_pattern ? pattern_data[word_idx] : text_data[word_idx];
+    return (word >> (byte_idx << 3u)) & 0xFFu;
+}
+
+// Get 4 bytes as a packed word from text buffer at arbitrary byte position
+uint get_word_at(uint byte_pos) {
+    uint word_idx = byte_pos >> 2u;
+    uint byte_offset = byte_pos & 3u;
+
+    if (byte_offset == 0u) {
+        return text_data[word_idx];
+    }
+
+    uint w0 = text_data[word_idx];
+    uint w1 = text_data[word_idx + 1u];
+    uint shift = byte_offset << 3u;
+    return (w0 >> shift) | (w1 << (32u - shift));
+}
+
+// Get 4 bytes as a packed word from pattern buffer
+uint get_pattern_word_at(uint byte_pos) {
+    uint word_idx = byte_pos >> 2u;
+    uint byte_offset = byte_pos & 3u;
+
+    if (byte_offset == 0u) {
+        return pattern_data[word_idx];
+    }
+
+    uint w0 = pattern_data[word_idx];
+    uint w1 = pattern_data[word_idx + 1u];
+    uint shift = byte_offset << 3u;
+    return (w0 >> shift) | (w1 << (32u - shift));
+}
+
+// Get skip value from table
+uint get_skip(uint c) {
+    uint word_idx = c >> 2u;
+    uint byte_idx = c & 3u;
+    return (skip_table_data[word_idx] >> (byte_idx << 3u)) & 0xFFu;
+}
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+
+    // gid is line index
+    uint line_start = line_offsets[gid];
+    uint line_len = line_lengths[gid];
+    uint line_end = line_start + line_len;
+
+    bool case_insensitive = (config.flags & FLAG_CASE_INSENSITIVE) != 0u;
+    bool invert_match = (config.flags & FLAG_INVERT_MATCH) != 0u;
+
+    bool found_match = false;
+    uint match_pos = 0u;
+
+    if (config.pattern_len == 0u) {
+        found_match = true;
+    } else if (line_len >= config.pattern_len) {
+        uint pos = 0u;
+        uint pattern_len = config.pattern_len;
+
+        while (pos + pattern_len <= line_len && !found_match) {
+            uint text_pos = line_start + pos;
+            uint remaining = pattern_len;
+            uint offset = 0u;
+            bool match_ok = true;
+
+            // Process 16 bytes (4 words) at a time using uvec4
+            while (remaining >= 16u && match_ok) {
+                uvec4 text_words = uvec4(
+                    get_word_at(text_pos + offset),
+                    get_word_at(text_pos + offset + 4u),
+                    get_word_at(text_pos + offset + 8u),
+                    get_word_at(text_pos + offset + 12u)
+                );
+                uvec4 pattern_words = uvec4(
+                    get_pattern_word_at(offset),
+                    get_pattern_word_at(offset + 4u),
+                    get_pattern_word_at(offset + 8u),
+                    get_pattern_word_at(offset + 12u)
+                );
+
+                if (!match_uvec4(text_words, pattern_words, case_insensitive)) {
+                    match_ok = false;
+                }
+                offset += 16u;
+                remaining -= 16u;
+            }
+
+            // Process 4 bytes at a time
+            while (remaining >= 4u && match_ok) {
+                uint text_word = get_word_at(text_pos + offset);
+                uint pattern_word = get_pattern_word_at(offset);
+
+                if (!match_word(text_word, pattern_word, case_insensitive)) {
+                    match_ok = false;
+                }
+                offset += 4u;
+                remaining -= 4u;
+            }
+
+            // Process remaining bytes one at a time
+            while (remaining > 0u && match_ok) {
+                uint tc = get_byte(text_pos + offset, false);
+                uint pc = get_byte(offset, true);
+
+                if (case_insensitive) {
+                    if (to_lower(tc) != to_lower(pc)) {
+                        match_ok = false;
+                    }
+                } else {
+                    if (tc != pc) {
+                        match_ok = false;
+                    }
+                }
+                offset++;
+                remaining--;
+            }
+
+            if (match_ok) {
+                found_match = true;
+                match_pos = pos;
+            } else {
+                // Use skip table for next position
+                uint skip_char = get_byte(text_pos + pattern_len - 1u, false);
+                uint skip = get_skip(skip_char);
+                pos += max(skip, 1u);
+            }
+        }
+    }
+
+    if (invert_match) {
+        found_match = !found_match;
+    }
+
+    if (found_match) {
+        uint idx = atomicAdd(match_count, 1u);
+        if (idx < config.max_results) {
+            results[idx].line_start = line_start;
+            results[idx].line_end = line_end;
+            results[idx].match_start = config.pattern_len > 0u ? match_pos : 0u;
+            results[idx].match_end = config.pattern_len > 0u ? match_pos + config.pattern_len : 0u;
+            results[idx].line_num = gid;
+            results[idx].field_count = 0u;
+        }
+    }
+}
