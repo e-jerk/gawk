@@ -1,0 +1,16 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    uses: e-jerk/.github/workflows/release.yml@main
+    with:
+      binary_name: gawk

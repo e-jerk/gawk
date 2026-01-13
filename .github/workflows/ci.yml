@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ci:
+    uses: e-jerk/.github/workflows/ci.yml@main
+    with:
+      binary_name: gawk
+      macos_test_script: |
+        echo "hello world foo bar" > test.txt
+        $BINARY --cpu '/foo/' test.txt | grep -q foo
+        echo "PASS: pattern match"
+      linux_test_script: |
+        echo "hello world foo bar" > test.txt
+        $BINARY --cpu '/foo/' test.txt | grep -q foo
+        echo "PASS: pattern match"
