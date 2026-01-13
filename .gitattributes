@@ -1,0 +1,3 @@
+# Linguist overrides
+*.metal linguist-language=Metal
+*.comp linguist-language=GLSL
