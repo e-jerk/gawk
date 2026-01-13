@@ -11,6 +11,6 @@ permissions:
 
 jobs:
   release:
-    uses: e-jerk/.github/workflows/release.yml@main
+    uses: e-jerk/.github/.github/workflows/release.yml@main
     with:
       binary_name: gawk

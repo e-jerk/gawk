@@ -8,7 +8,7 @@ on:
 
 jobs:
   ci:
-    uses: e-jerk/.github/workflows/ci.yml@main
+    uses: e-jerk/.github/.github/workflows/ci.yml@main
     with:
       binary_name: gawk
       macos_test_script: |
