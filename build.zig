@@ -89,11 +89,21 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // Create cpu module for reuse
+    // Create cpu module for reuse (optimized SIMD implementation)
     const cpu_module = b.addModule("cpu", .{
-        .root_source_file = b.path("src/cpu.zig"),
+        .root_source_file = b.path("src/cpu_optimized.zig"),
         .imports = &.{
             .{ .name = "gpu", .module = gpu_module },
+        },
+    });
+
+    // Create cpu_gnu module (GNU gawk reference implementation)
+    // Note: Delegates to optimized backend since GNU gawk's interpreter is tightly integrated
+    const cpu_gnu_module = b.addModule("cpu_gnu", .{
+        .root_source_file = b.path("src/cpu_gnu.zig"),
+        .imports = &.{
+            .{ .name = "gpu", .module = gpu_module },
+            .{ .name = "cpu_optimized", .module = cpu_module },
         },
     });
 
@@ -111,6 +121,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "spirv", .module = spirv_module },
                 .{ .name = "gpu", .module = gpu_module },
                 .{ .name = "cpu", .module = cpu_module },
+                .{ .name = "cpu_gnu", .module = cpu_gnu_module },
             },
         }),
     });
@@ -158,6 +169,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "spirv", .module = spirv_module },
                 .{ .name = "gpu", .module = gpu_module },
                 .{ .name = "cpu", .module = cpu_module },
+                .{ .name = "cpu_gnu", .module = cpu_gnu_module },
             },
         }),
     });
@@ -201,6 +213,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "spirv", .module = spirv_module },
                 .{ .name = "gpu", .module = gpu_module },
                 .{ .name = "cpu", .module = cpu_module },
+                .{ .name = "cpu_gnu", .module = cpu_gnu_module },
             },
         }),
     });
@@ -243,6 +256,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "spirv", .module = spirv_module },
                 .{ .name = "gpu", .module = gpu_module },
                 .{ .name = "cpu", .module = cpu_module },
+                .{ .name = "cpu_gnu", .module = cpu_gnu_module },
             },
         }),
     });

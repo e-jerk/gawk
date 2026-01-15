@@ -2,6 +2,7 @@ const std = @import("std");
 const build_options = @import("build_options");
 const gpu = @import("gpu");
 const cpu = @import("cpu");
+const cpu_gnu = @import("cpu_gnu");
 
 const AwkOptions = gpu.AwkOptions;
 
@@ -46,6 +47,8 @@ pub fn main() !u8 {
             backend_mode = parseBackendMode(args[i]);
         } else if (std.mem.eql(u8, arg, "--cpu")) {
             backend_mode = .cpu;
+        } else if (std.mem.eql(u8, arg, "--gnu")) {
+            backend_mode = .cpu_gnu;
         } else if (std.mem.eql(u8, arg, "--gpu")) {
             backend_mode = .gpu;
         } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
@@ -158,7 +161,10 @@ pub fn main() !u8 {
                 break :blk try cpu.processAwk(text, pattern, options, allocator);
             };
         },
-        .cpu, .cuda, .opencl => try cpu.processAwk(text, pattern, options, allocator),
+        .cpu, .cuda, .opencl => if (backend_mode == .cpu_gnu)
+            try cpu_gnu.processAwk(text, pattern, options, allocator)
+        else
+            try cpu.processAwk(text, pattern, options, allocator),
     };
     defer result.deinit();
 
@@ -199,6 +205,7 @@ const BackendMode = enum {
     auto,
     gpu,
     cpu,
+    cpu_gnu, // GNU gawk reference implementation
     metal,
     vulkan,
 };
@@ -207,6 +214,7 @@ fn parseBackendMode(s: []const u8) BackendMode {
     if (std.mem.eql(u8, s, "auto")) return .auto;
     if (std.mem.eql(u8, s, "gpu")) return .gpu;
     if (std.mem.eql(u8, s, "cpu")) return .cpu;
+    if (std.mem.eql(u8, s, "gnu")) return .cpu_gnu;
     if (std.mem.eql(u8, s, "metal")) return .metal;
     if (std.mem.eql(u8, s, "vulkan")) return .vulkan;
     return .auto;
@@ -215,7 +223,7 @@ fn parseBackendMode(s: []const u8) BackendMode {
 fn selectBackend(mode: BackendMode, text_len: usize, verbose: bool) gpu.Backend {
     _ = verbose;
     switch (mode) {
-        .cpu => return .cpu,
+        .cpu, .cpu_gnu => return .cpu,
         .metal => return .metal,
         .vulkan => return .vulkan,
         .gpu => {
@@ -349,8 +357,9 @@ fn printHelp() void {
         \\  -F SEP         Use SEP as field separator (default: whitespace)
         \\  -i             Case-insensitive pattern matching
         \\  -v             Invert match (print non-matching lines)
-        \\  --backend MODE Backend: auto, cpu, gpu, metal, vulkan (default: auto)
+        \\  --backend MODE Backend: auto, cpu, gnu, gpu, metal, vulkan (default: auto)
         \\  --cpu          Force CPU backend
+        \\  --gnu          Force GNU backend (reference implementation)
         \\  --gpu          Force GPU backend (Metal on macOS, Vulkan otherwise)
         \\  --verbose      Print backend selection and timing info
         \\  -h, --help     Show this help

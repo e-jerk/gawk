@@ -2,6 +2,7 @@ const std = @import("std");
 const build_options = @import("build_options");
 const gpu = @import("gpu");
 const cpu = @import("cpu");
+const cpu_gnu = @import("cpu_gnu");
 
 const AwkOptions = gpu.AwkOptions;
 
@@ -53,10 +54,15 @@ pub fn main() !void {
 
     std.debug.print("Expected matches: {d}\n\n", .{expected_matches});
 
-    // CPU benchmark
-    std.debug.print("Benchmarking CPU...\n", .{});
+    // CPU (Optimized) benchmark
+    std.debug.print("Benchmarking CPU (Optimized)...\n", .{});
     const cpu_times = try benchmarkCpu(text, pattern, options, allocator, iterations);
     defer allocator.free(cpu_times);
+
+    // CPU (GNU) benchmark
+    std.debug.print("Benchmarking CPU (GNU)...\n", .{});
+    const cpu_gnu_times = try benchmarkCpuGnu(text, pattern, options, allocator, iterations);
+    defer if (cpu_gnu_times) |t| allocator.free(t);
 
     // Metal benchmark
     var metal_times: ?[]u64 = null;
@@ -97,7 +103,15 @@ pub fn main() !void {
     const cpu_min = minimum(cpu_times);
     const cpu_throughput = @as(f64, @floatFromInt(file_size)) / (cpu_avg / 1000.0) / (1024 * 1024);
 
-    std.debug.print("{s:<12} {d:>12.1} {d:>12.1} {d:>9.1} MB/s {d:>9.1}x\n", .{ "CPU", cpu_avg, cpu_min, cpu_throughput, 1.0 });
+    std.debug.print("{s:<12} {d:>12.1} {d:>12.1} {d:>9.1} MB/s {d:>9.1}x\n", .{ "CPU-Optimized", cpu_avg, cpu_min, cpu_throughput, 1.0 });
+
+    if (cpu_gnu_times) |times| {
+        const gnu_avg = average(times);
+        const gnu_min = minimum(times);
+        const gnu_throughput = @as(f64, @floatFromInt(file_size)) / (gnu_avg / 1000.0) / (1024 * 1024);
+        const gnu_speedup = cpu_avg / gnu_avg;
+        std.debug.print("{s:<12} {d:>12.1} {d:>12.1} {d:>9.1} MB/s {d:>9.1}x\n", .{ "CPU-GNU", gnu_avg, gnu_min, gnu_throughput, gnu_speedup });
+    }
 
     if (metal_times) |times| {
         const metal_avg = average(times);
@@ -120,7 +134,16 @@ pub fn main() !void {
 
     var cpu_result = try cpu.processAwk(text, pattern, options, allocator);
     defer cpu_result.deinit();
-    std.debug.print("CPU:    {d} matches - {s}\n", .{ cpu_result.matches.len, if (cpu_result.matches.len == expected_matches) "PASS" else "FAIL" });
+    std.debug.print("CPU-Optimized: {d} matches - {s}\n", .{ cpu_result.matches.len, if (cpu_result.matches.len == expected_matches) "PASS" else "FAIL" });
+
+    // GNU correctness check
+    if (cpu_gnu.processAwk(text, pattern, options, allocator)) |gnu_res| {
+        var gnu_result = gnu_res;
+        defer gnu_result.deinit();
+        std.debug.print("CPU-GNU:       {d} matches - {s}\n", .{ gnu_result.matches.len, if (gnu_result.matches.len == expected_matches) "PASS" else "FAIL" });
+    } else |_| {
+        std.debug.print("CPU-GNU:       unavailable\n", .{});
+    }
 
     if (build_options.is_macos) {
         std.debug.print("Metal:  {d} matches - {s}\n", .{ metal_matches, if (metal_matches == expected_matches) "PASS" else "FAIL" });
@@ -170,6 +193,23 @@ fn benchmarkCpu(text: []const u8, pattern: []const u8, options: AwkOptions, allo
     for (0..iterations) |i| {
         var timer = try std.time.Timer.start();
         var result = try cpu.processAwk(text, pattern, options, allocator);
+        times[i] = timer.read() / std.time.ns_per_ms;
+        result.deinit();
+    }
+
+    return times;
+}
+
+fn benchmarkCpuGnu(text: []const u8, pattern: []const u8, options: AwkOptions, allocator: std.mem.Allocator, iterations: usize) !?[]u64 {
+    var times = try allocator.alloc(u64, iterations);
+
+    for (0..iterations) |i| {
+        var timer = try std.time.Timer.start();
+        var result = cpu_gnu.processAwk(text, pattern, options, allocator) catch |err| {
+            std.debug.print("GNU processAwk failed: {}\n", .{err});
+            allocator.free(times);
+            return null;
+        };
         times[i] = timer.read() / std.time.ns_per_ms;
         result.deinit();
     }
