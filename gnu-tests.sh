@@ -189,6 +189,78 @@ EXPECTED=$($AWK '{print $2}' "$TMPDIR/spaces.txt")
 ACTUAL=$($GAWK '{print $2}' "$TMPDIR/spaces.txt")
 if [ "$EXPECTED" = "$ACTUAL" ]; then pass; else fail; fi
 
+# Test 21: length() function
+echo -n "Test 21: length() function... "
+EXPECTED=$(echo "hello world" | $AWK '{print length($1)}')
+ACTUAL=$(echo "hello world" | $GAWK '{print length($1)}')
+if [ "$EXPECTED" = "$ACTUAL" ]; then pass; else fail; fi
+
+# Test 22: substr() function with start and length
+echo -n "Test 22: substr() with start and length... "
+EXPECTED=$(echo "hello world" | $AWK '{print substr($1, 1, 3)}')
+ACTUAL=$(echo "hello world" | $GAWK '{print substr($1, 1, 3)}')
+if [ "$EXPECTED" = "$ACTUAL" ]; then pass; else fail; fi
+
+# Test 23: substr() with only start (to end)
+echo -n "Test 23: substr() to end... "
+EXPECTED=$(echo "hello world" | $AWK '{print substr($1, 3)}')
+ACTUAL=$(echo "hello world" | $GAWK '{print substr($1, 3)}')
+if [ "$EXPECTED" = "$ACTUAL" ]; then pass; else fail; fi
+
+# Test 24: index() function - found
+echo -n "Test 24: index() found... "
+EXPECTED=$(echo "hello" | $AWK '{print index($1, "ll")}')
+ACTUAL=$(echo "hello" | $GAWK '{print index($1, "ll")}')
+if [ "$EXPECTED" = "$ACTUAL" ]; then pass; else fail; fi
+
+# Test 25: index() function - not found
+echo -n "Test 25: index() not found... "
+EXPECTED=$(echo "hello" | $AWK '{print index($1, "xyz")}')
+ACTUAL=$(echo "hello" | $GAWK '{print index($1, "xyz")}')
+if [ "$EXPECTED" = "$ACTUAL" ]; then pass; else fail; fi
+
+# Test 26: toupper() function
+echo -n "Test 26: toupper() function... "
+EXPECTED=$(echo "hello" | $AWK '{print toupper($1)}')
+ACTUAL=$(echo "hello" | $GAWK '{print toupper($1)}')
+if [ "$EXPECTED" = "$ACTUAL" ]; then pass; else fail; fi
+
+# Test 27: tolower() function
+echo -n "Test 27: tolower() function... "
+EXPECTED=$(echo "HELLO" | $AWK '{print tolower($1)}')
+ACTUAL=$(echo "HELLO" | $GAWK '{print tolower($1)}')
+if [ "$EXPECTED" = "$ACTUAL" ]; then pass; else fail; fi
+
+# Test 28: length() on multiple lines
+echo -n "Test 28: length() multi-line... "
+EXPECTED=$(echo -e "foo\nbarbar\n" | $AWK '{print length($1)}')
+ACTUAL=$(echo -e "foo\nbarbar\n" | $GAWK '{print length($1)}')
+if [ "$EXPECTED" = "$ACTUAL" ]; then pass; else fail; fi
+
+# Test 29: NR variable (line number)
+echo -n "Test 29: NR variable... "
+EXPECTED=$(echo -e "a\nb\nc" | $AWK '{print NR}')
+ACTUAL=$(echo -e "a\nb\nc" | $GAWK '{print NR}')
+if [ "$EXPECTED" = "$ACTUAL" ]; then pass; else fail; fi
+
+# Test 30: NF variable (number of fields)
+echo -n "Test 30: NF variable... "
+EXPECTED=$(echo -e "a b c\nd e f g\nh" | $AWK '{print NF}')
+ACTUAL=$(echo -e "a b c\nd e f g\nh" | $GAWK '{print NF}')
+if [ "$EXPECTED" = "$ACTUAL" ]; then pass; else fail; fi
+
+# Test 31: NR with pattern
+echo -n "Test 31: NR with pattern... "
+EXPECTED=$(echo -e "foo\nbar\nfoo" | $AWK '/foo/ {print NR}')
+ACTUAL=$(echo -e "foo\nbar\nfoo" | $GAWK '/foo/ {print NR}')
+if [ "$EXPECTED" = "$ACTUAL" ]; then pass; else fail; fi
+
+# Test 32: NF with field separator
+echo -n "Test 32: NF with separator... "
+EXPECTED=$(echo "a:b:c:d" | $AWK -F: '{print NF}')
+ACTUAL=$(echo "a:b:c:d" | $GAWK -F: '{print NF}')
+if [ "$EXPECTED" = "$ACTUAL" ]; then pass; else fail; fi
+
 echo ""
 echo "=== Summary ==="
 echo -e "Passed: ${GREEN}$passed${NC}"

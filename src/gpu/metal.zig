@@ -218,9 +218,9 @@ pub const MetalAwk = struct {
             @memcpy(matches, results_ptr[0..num_to_copy]);
         }
 
-        // For now, do field splitting on CPU (simpler implementation)
+        // Do field splitting on CPU and update field_count for NF support
         var fields: std.ArrayListUnmanaged(FieldInfo) = .{};
-        for (matches, 0..) |match, idx| {
+        for (matches, 0..) |*match, idx| {
             const line = text[match.line_start..match.line_end];
             var field_idx: u32 = 1;
             var field_start: u32 = 0;
@@ -257,7 +257,11 @@ pub const MetalAwk = struct {
                     .start_offset = field_start,
                     .end_offset = @intCast(line.len),
                 });
+                field_idx += 1;
             }
+
+            // Update field_count for NF variable support
+            match.field_count = field_idx - 1;
         }
 
         return AwkResult{

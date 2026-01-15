@@ -404,9 +404,9 @@ pub const VulkanAwk = struct {
 
         self.vkd.resetDescriptorPool(self.device, self.descriptor_pool, .{}) catch {};
 
-        // Field splitting on CPU
+        // Field splitting on CPU and update field_count for NF support
         var fields: std.ArrayListUnmanaged(FieldInfo) = .{};
-        for (matches, 0..) |match, idx| {
+        for (matches, 0..) |*match, idx| {
             const line = text[match.line_start..match.line_end];
             var field_idx: u32 = 1;
             var field_start: u32 = 0;
@@ -443,7 +443,11 @@ pub const VulkanAwk = struct {
                     .start_offset = field_start,
                     .end_offset = @intCast(line.len),
                 });
+                field_idx += 1;
             }
+
+            // Update field_count for NF variable support
+            match.field_count = field_idx - 1;
         }
 
         return AwkResult{
