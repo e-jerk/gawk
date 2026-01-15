@@ -3,8 +3,10 @@ const build_options = @import("build_options");
 const gpu = @import("gpu");
 const cpu = @import("cpu");
 const cpu_gnu = @import("cpu_gnu");
+const regex = @import("regex");
 
 const AwkOptions = gpu.AwkOptions;
+const isRegexPattern = regex.isRegexPattern;
 
 pub fn main() !u8 {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -124,18 +126,34 @@ pub fn main() !u8 {
 
     // Handle substitution mode (gsub)
     if (is_substitution) {
-        const substitutions = try cpu.findSubstitutions(text, pattern, options, allocator);
-        defer allocator.free(substitutions);
+        // Check if pattern contains regex metacharacters
+        const use_regex = isRegexPattern(pattern);
 
-        const result_text = try cpu.applySubstitutions(text, substitutions, pattern.len, replacement, allocator);
-        defer allocator.free(result_text);
+        if (use_regex) {
+            const substitutions = try cpu.findSubstitutionsRegex(text, pattern, options, allocator);
+            defer allocator.free(substitutions);
 
-        _ = std.posix.write(std.posix.STDOUT_FILENO, result_text) catch {};
+            const result_text = try cpu.applySubstitutionsRegex(text, substitutions, replacement, allocator);
+            defer allocator.free(result_text);
+
+            _ = std.posix.write(std.posix.STDOUT_FILENO, result_text) catch {};
+        } else {
+            const substitutions = try cpu.findSubstitutions(text, pattern, options, allocator);
+            defer allocator.free(substitutions);
+
+            const result_text = try cpu.applySubstitutions(text, substitutions, pattern.len, replacement, allocator);
+            defer allocator.free(result_text);
+
+            _ = std.posix.write(std.posix.STDOUT_FILENO, result_text) catch {};
+        }
         return 0;
     }
 
-    // Select backend
-    const backend = selectBackend(backend_mode, text.len, verbose);
+    // Check if pattern contains regex metacharacters
+    const use_regex = pattern.len > 0 and isRegexPattern(pattern);
+
+    // Select backend (GPU backends don't support regex yet, fall back to CPU)
+    const backend = if (use_regex) gpu.Backend.cpu else selectBackend(backend_mode, text.len, verbose);
 
     // Process AWK
     var result = switch (backend) {
@@ -167,6 +185,8 @@ pub fn main() !u8 {
         },
         .cpu, .cuda, .opencl => if (backend_mode == .cpu_gnu)
             try cpu_gnu.processAwk(text, pattern, options, allocator)
+        else if (use_regex)
+            try cpu.processAwkRegex(text, pattern, options, allocator)
         else
             try cpu.processAwk(text, pattern, options, allocator),
     };

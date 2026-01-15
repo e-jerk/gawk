@@ -17,6 +17,10 @@ pub fn build(b: *std.Build) void {
     const e_jerk_gpu_module = e_jerk_gpu_dep.module("e_jerk_gpu");
     const zigtrait_module = e_jerk_gpu_dep.module("zigtrait");
 
+    // e_jerk_regex library for regex support
+    const e_jerk_regex_dep = b.dependency("e_jerk_regex", .{});
+    const e_jerk_regex_module = e_jerk_regex_dep.module("regex");
+
     // zig-metal dependency
     const zig_metal_dep = b.dependency("zig_metal", .{});
     const zig_metal_module = b.addModule("zig-metal", .{
@@ -94,6 +98,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/cpu_optimized.zig"),
         .imports = &.{
             .{ .name = "gpu", .module = gpu_module },
+            .{ .name = "regex", .module = e_jerk_regex_module },
         },
     });
 
@@ -122,6 +127,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "gpu", .module = gpu_module },
                 .{ .name = "cpu", .module = cpu_module },
                 .{ .name = "cpu_gnu", .module = cpu_gnu_module },
+                .{ .name = "regex", .module = e_jerk_regex_module },
             },
         }),
     });
