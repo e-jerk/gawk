@@ -1,0 +1,22 @@
+# Build artifacts
+zig-out/
+zig-cache/
+.zig-cache/
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+
+# Documentation
+*.md
+LICENSE
+
+# CI/CD
+.github/
+
+# Formula
+Formula/
