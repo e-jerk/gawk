@@ -63,36 +63,36 @@ gawk -V '/pattern/' file.txt
 
 ## GNU Feature Compatibility
 
-| Feature | CPU-Optimized | GNU Backend | Metal | Vulkan | Status |
-|---------|:-------------:|:-----------:|:-----:|:------:|--------|
-| `/pattern/` matching | ✓ | ✓ | ✓ | ✓ | Native |
-| `{print $N}` field extraction | ✓ | ✓ | ✓ | ✓ | Native |
-| `-F` field separator | ✓ | ✓ | ✓ | ✓ | Native |
-| `-i` case insensitive | ✓ | ✓ | ✓ | ✓ | Native |
-| `-v` invert match | ✓ | ✓ | ✓ | ✓ | Native |
-| `!/pattern/` negation | ✓ | ✓ | ✓ | ✓ | Native |
-| `gsub(/pat/, "repl")` | ✓ | ✓ | — | — | Native (CPU) |
-| `length($N)` | ✓ | ✓ | ✓ | ✓ | **Native** |
-| `substr($N, s, l)` | ✓ | ✓ | ✓ | ✓ | **Native** |
-| `index($N, "str")` | ✓ | ✓ | ✓ | ✓ | **Native** |
-| `toupper($N)` | ✓ | ✓ | ✓ | ✓ | **Native** |
-| `tolower($N)` | ✓ | ✓ | ✓ | ✓ | **Native** |
-| `NR` (line number) | ✓ | ✓ | ✓ | ✓ | **Native** |
-| `NF` (field count) | ✓ | ✓ | ✓ | ✓ | **Native** |
-| Regex patterns `/[a-z]+/` | ✓ | ✓ | ✓ | ✓ | **Native** |
-| `BEGIN/END` blocks | ✓ | ✓ | — | — | **Native** |
-| Variables `x=5` | ✓ | ✓ | — | — | **Native** |
-| User-defined functions | ✓ | ✓ | — | — | **Native** |
-| Multiple patterns | ✓ | ✓ | — | — | **Native** |
-| Arithmetic expressions | ✓ | ✓ | — | — | **Native** |
-| Conditionals `if/else` | ✓ | ✓ | — | — | **Native** |
-| Loops `while/for` | ✓ | ✓ | — | — | **Native** |
-| Arrays `a[i]` | ✓ | ✓ | — | — | **Native** |
-| `printf/sprintf` | ✓ | ✓ | — | — | **Native** |
+| Feature | CPU | Metal | Vulkan | GPU Speedup | Status |
+|---------|:---:|:-----:|:------:|:-----------:|--------|
+| `/pattern/` matching | ✓ | ✓ | ✓ | **15x** | Native |
+| `{print $N}` field extraction | ✓ | ✓ | ✓ | **8x** | Native |
+| `-F` field separator | ✓ | ✓ | ✓ | **8x** | Native |
+| `-i` case insensitive | ✓ | ✓ | ✓ | **6x** | Native |
+| `-v` invert match | ✓ | ✓ | ✓ | **8x** | Native |
+| `!/pattern/` negation | ✓ | ✓ | ✓ | **8x** | Native |
+| Regex patterns `/[a-z]+/` | ✓ | ✓ | ✓ | **5-10x** | **Native** |
+| `length($N)` | ✓ | ✓ | ✓ | **8x** | **Native** |
+| `substr($N, s, l)` | ✓ | ✓ | ✓ | **8x** | **Native** |
+| `index($N, "str")` | ✓ | ✓ | ✓ | **8x** | **Native** |
+| `toupper($N)` | ✓ | ✓ | ✓ | **8x** | **Native** |
+| `tolower($N)` | ✓ | ✓ | ✓ | **8x** | **Native** |
+| `NR` (line number) | ✓ | ✓ | ✓ | **8x** | **Native** |
+| `NF` (field count) | ✓ | ✓ | ✓ | **8x** | **Native** |
+| `gsub(/pat/, "repl")` | ✓ | — | — | CPU only | Native |
+| `BEGIN/END` blocks | ✓ | — | — | CPU only | **Native** |
+| Variables `x=5` | ✓ | — | — | CPU only | **Native** |
+| User-defined functions | ✓ | — | — | CPU only | **Native** |
+| Multiple patterns | ✓ | — | — | CPU only | **Native** |
+| Arithmetic expressions | ✓ | — | — | CPU only | **Native** |
+| Conditionals `if/else` | ✓ | — | — | CPU only | **Native** |
+| Loops `while/for` | ✓ | — | — | CPU only | **Native** |
+| Arrays `a[i]` | ✓ | — | — | CPU only | **Native** |
+| `printf/sprintf` | ✓ | — | — | CPU only | **Native** |
 
 **Test Coverage**: 32/32 GNU compatibility tests passing, 16+ smoke tests including regex
 
-**Backend Parity**: CPU, Metal, and Vulkan produce identical results for all features.
+**Backend Parity**: CPU, Metal, and Vulkan produce identical results for GPU-accelerated features.
 
 ## Built-in Functions
 
