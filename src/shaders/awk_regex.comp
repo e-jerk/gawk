@@ -1,0 +1,296 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// GPU-Accelerated AWK Regex Operations (Vulkan/GLSL)
+// Implements Thompson NFA execution for regex pattern matching
+
+#include "string_ops.glsl"
+#include "regex_ops.glsl"
+
+// AWK-specific flags (different from regex_ops.glsl header flags)
+const uint AWK_FLAG_CASE_INSENSITIVE = 1u;
+const uint AWK_FLAG_INVERT_MATCH = 32u;
+const uint AWK_FLAG_REGEX_MODE = 128u;
+
+struct AwkRegexConfig {
+    uint text_len;
+    uint num_states;
+    uint start_state;
+    uint header_flags;
+    uint num_bitmaps;
+    uint max_results;
+    uint flags;
+    uint _pad;
+};
+
+struct AwkMatchResult {
+    uint line_start;
+    uint line_end;
+    uint match_start;
+    uint match_end;
+    uint line_num;
+    uint field_count;
+    uint _pad1;
+    uint _pad2;
+};
+
+// Buffer bindings
+layout(std430, binding = 0) readonly buffer TextBuffer { uint text_data[]; };
+layout(std430, binding = 1) readonly buffer StatesBuffer { uint states_data[]; };
+layout(std430, binding = 2) readonly buffer BitmapsBuffer { uint bitmaps_data[]; };
+layout(std430, binding = 3) readonly buffer ConfigBuffer { AwkRegexConfig config; };
+layout(std430, binding = 4) writeonly buffer ResultBuffer { AwkMatchResult results[]; };
+layout(std430, binding = 5) buffer CounterBuffer { uint match_count; };
+layout(std430, binding = 6) readonly buffer LineOffsetsBuffer { uint line_offsets[]; };
+layout(std430, binding = 7) readonly buffer LineLengthsBuffer { uint line_lengths[]; };
+
+// Get byte from packed text buffer
+uint get_text_byte(uint pos) {
+    uint word_idx = pos >> 2u;
+    uint byte_idx = pos & 3u;
+    return (text_data[word_idx] >> (byte_idx << 3u)) & 0xFFu;
+}
+
+// Read regex state data (packed as 3 x uint32 per state)
+// Layout: [type:8][flags:8][out:16] [out2:16][literal:8][group_idx:8] [bitmap_offset:32]
+void read_state(uint state_idx, out uint state_type, out uint state_flags,
+                out uint state_out, out uint state_out2, out uint state_literal,
+                out uint state_bitmap_offset) {
+    uint base = state_idx * 3u;
+    uint word0 = states_data[base];
+    uint word1 = states_data[base + 1u];
+    uint word2 = states_data[base + 2u];
+
+    state_type = get_state_type(word0);
+    state_flags = get_state_flags(word0);
+    state_out = get_state_out(word0);
+    state_out2 = get_state_out2(word1);
+    state_literal = get_state_literal(word1);
+    state_bitmap_offset = get_state_bitmap_offset(word2);
+}
+
+// Get bitmap word for character class matching
+uint get_bitmap_word(uint bitmap_offset, uint char_word_idx) {
+    return bitmaps_data[bitmap_offset + char_word_idx];
+}
+
+// Add state following epsilon transitions (iterative version to avoid recursion limits)
+void add_state_epsilon(inout uint current[8], uint state_idx, uint pos, uint line_start, uint line_len) {
+    // Use a simple stack for BFS traversal
+    uint stack[32];
+    uint stack_ptr = 0;
+    stack[stack_ptr++] = state_idx;
+
+    while (stack_ptr > 0) {
+        uint idx = stack[--stack_ptr];
+        if (idx >= MAX_REGEX_STATES) continue;
+        if (STATE_SET_CONTAINS(current, idx)) continue;
+
+        uint s_type, s_flags, s_out, s_out2, s_literal, s_bitmap;
+        read_state(idx, s_type, s_flags, s_out, s_out2, s_literal, s_bitmap);
+
+        if (s_type == STATE_SPLIT) {
+            if (stack_ptr < 31u && s_out < MAX_REGEX_STATES) stack[stack_ptr++] = s_out;
+            if (stack_ptr < 31u && s_out2 < MAX_REGEX_STATES) stack[stack_ptr++] = s_out2;
+        }
+        else if (s_type == STATE_GROUP_START || s_type == STATE_GROUP_END) {
+            if (stack_ptr < 31u && s_out < MAX_REGEX_STATES) stack[stack_ptr++] = s_out;
+        }
+        else if (s_type == STATE_LINE_START) {
+            // Check if at line start
+            if (pos == 0u || (pos > 0u && get_text_byte(line_start + pos - 1u) == 10u)) {
+                if (stack_ptr < 31u && s_out < MAX_REGEX_STATES) stack[stack_ptr++] = s_out;
+            }
+        }
+        else if (s_type == STATE_LINE_END) {
+            // Check if at line end
+            if (pos == line_len || (pos < line_len && get_text_byte(line_start + pos) == 10u)) {
+                if (stack_ptr < 31u && s_out < MAX_REGEX_STATES) stack[stack_ptr++] = s_out;
+            }
+        }
+        else if (s_type == STATE_WORD_BOUNDARY) {
+            bool prev_word = (pos > 0u) ? regex_is_word_char(get_text_byte(line_start + pos - 1u)) : false;
+            bool curr_word = (pos < line_len) ? regex_is_word_char(get_text_byte(line_start + pos)) : false;
+            if (prev_word != curr_word) {
+                if (stack_ptr < 31u && s_out < MAX_REGEX_STATES) stack[stack_ptr++] = s_out;
+            }
+        }
+        else if (s_type == STATE_NOT_WORD_BOUNDARY) {
+            bool prev_word = (pos > 0u) ? regex_is_word_char(get_text_byte(line_start + pos - 1u)) : false;
+            bool curr_word = (pos < line_len) ? regex_is_word_char(get_text_byte(line_start + pos)) : false;
+            if (prev_word == curr_word) {
+                if (stack_ptr < 31u && s_out < MAX_REGEX_STATES) stack[stack_ptr++] = s_out;
+            }
+        }
+        else {
+            STATE_SET_ADD(current, idx);
+        }
+    }
+}
+
+// Check if state matches character
+bool state_matches_char(uint state_idx, uint c) {
+    uint s_type, s_flags, s_out, s_out2, s_literal, s_bitmap;
+    read_state(state_idx, s_type, s_flags, s_out, s_out2, s_literal, s_bitmap);
+
+    bool case_insensitive = (s_flags & STATE_FLAG_CASE_INSENSITIVE) != 0u;
+
+    if (s_type == STATE_LITERAL) {
+        if (case_insensitive) {
+            return regex_to_lower(c) == regex_to_lower(s_literal);
+        }
+        return c == s_literal;
+    }
+    else if (s_type == STATE_CHAR_CLASS) {
+        uint word_idx = c >> 5u;
+        uint bit_idx = c & 31u;
+        uint bitmap_word = get_bitmap_word(s_bitmap, word_idx);
+        return (bitmap_word & (1u << bit_idx)) != 0u;
+    }
+    else if (s_type == STATE_DOT) {
+        return c != 10u;  // Not newline
+    }
+    else if (s_type == STATE_ANY) {
+        return true;
+    }
+
+    return false;
+}
+
+// Execute NFA matching at position
+bool regex_match_at_pos(uint line_start, uint line_len, uint start_pos, out uint out_end) {
+    uint current[8];
+    uint next[8];
+    STATE_SET_CLEAR(current);
+    STATE_SET_CLEAR(next);
+
+    // Initialize with start state
+    add_state_epsilon(current, config.start_state, start_pos, line_start, line_len);
+
+    uint pos = start_pos;
+    bool found_match = false;
+    uint match_end = start_pos;
+
+    // Check for immediate match
+    for (uint word = 0u; word < 8u; word++) {
+        uint mask = current[word];
+        while (mask != 0u) {
+            uint bit = findLSB(mask);
+            uint state_idx = word * 32u + bit;
+            mask &= mask - 1u;
+
+            uint s_type, s_flags, s_out, s_out2, s_literal, s_bitmap;
+            read_state(state_idx, s_type, s_flags, s_out, s_out2, s_literal, s_bitmap);
+
+            if (s_type == STATE_MATCH) {
+                bool anchored_end = (config.header_flags & FLAG_ANCHORED_END) != 0u;
+                if (!anchored_end || pos == line_len) {
+                    found_match = true;
+                    match_end = pos;
+                }
+            }
+        }
+    }
+
+    // Process characters
+    while (pos < line_len && !STATE_SET_EMPTY(current)) {
+        uint c = get_text_byte(line_start + pos);
+        STATE_SET_CLEAR(next);
+
+        // For each active state
+        for (uint word = 0u; word < 8u; word++) {
+            uint mask = current[word];
+            while (mask != 0u) {
+                uint bit = findLSB(mask);
+                uint state_idx = word * 32u + bit;
+                mask &= mask - 1u;
+
+                if (state_matches_char(state_idx, c)) {
+                    uint s_type, s_flags, s_out, s_out2, s_literal, s_bitmap;
+                    read_state(state_idx, s_type, s_flags, s_out, s_out2, s_literal, s_bitmap);
+
+                    if (s_out < config.num_states) {
+                        add_state_epsilon(next, s_out, pos + 1u, line_start, line_len);
+                    }
+                }
+            }
+        }
+
+        // Swap current and next
+        STATE_SET_COPY(current, next);
+        pos++;
+
+        // Check for match
+        for (uint word = 0u; word < 8u; word++) {
+            uint mask = current[word];
+            while (mask != 0u) {
+                uint bit = findLSB(mask);
+                uint state_idx = word * 32u + bit;
+                mask &= mask - 1u;
+
+                uint s_type, s_flags, s_out, s_out2, s_literal, s_bitmap;
+                read_state(state_idx, s_type, s_flags, s_out, s_out2, s_literal, s_bitmap);
+
+                if (s_type == STATE_MATCH) {
+                    bool anchored_end = (config.header_flags & FLAG_ANCHORED_END) != 0u;
+                    if (!anchored_end || pos == line_len) {
+                        found_match = true;
+                        match_end = pos;
+                    }
+                }
+            }
+        }
+    }
+
+    out_end = match_end;
+    return found_match;
+}
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+
+    uint line_start = line_offsets[gid];
+    uint line_len = line_lengths[gid];
+    uint line_end = line_start + line_len;
+
+    bool invert_match = (config.flags & AWK_FLAG_INVERT_MATCH) != 0u;
+    bool anchored_start = (config.header_flags & FLAG_ANCHORED_START) != 0u;
+
+    bool found = false;
+    uint match_start = 0u;
+    uint match_end = 0u;
+
+    if (anchored_start) {
+        // Only try matching at position 0
+        found = regex_match_at_pos(line_start, line_len, 0u, match_end);
+        match_start = 0u;
+    } else {
+        // Try matching at each position
+        for (uint pos = 0u; pos <= line_len && !found; pos++) {
+            uint end;
+            if (regex_match_at_pos(line_start, line_len, pos, end)) {
+                found = true;
+                match_start = pos;
+                match_end = end;
+            }
+        }
+    }
+
+    if (invert_match) {
+        found = !found;
+    }
+
+    if (found) {
+        uint idx = atomicAdd(match_count, 1u);
+        if (idx < config.max_results) {
+            results[idx].line_start = line_start;
+            results[idx].line_end = line_end;
+            results[idx].match_start = invert_match ? 0u : match_start;
+            results[idx].match_end = invert_match ? 0u : match_end;
+            results[idx].line_num = gid;
+            results[idx].field_count = 0u;
+        }
+    }
+}

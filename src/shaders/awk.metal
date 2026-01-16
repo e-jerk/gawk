@@ -1,5 +1,6 @@
 #include <metal_stdlib>
 #include "string_ops.h"
+#include "regex_ops.h"
 using namespace metal;
 
 // GPU-Accelerated AWK Operations for Metal
@@ -284,5 +285,121 @@ kernel void find_line_boundaries(
         }
         pos++;
         remaining--;
+    }
+}
+
+// ============================================================================
+// Regex Pattern Matching Kernel
+// Uses Thompson NFA execution from regex_ops.h
+// ============================================================================
+
+struct AwkRegexConfig {
+    uint text_len;
+    uint num_states;
+    uint start_state;
+    uint header_flags;
+    uint num_bitmaps;
+    uint max_results;
+    uint flags;
+    uint _pad;
+};
+
+// GPU-accelerated regex pattern matching using NFA execution
+kernel void awk_regex_match(
+    device const uchar* text [[buffer(0)]],
+    constant RegexState* states [[buffer(1)]],
+    constant uint* bitmaps [[buffer(2)]],
+    constant AwkRegexConfig& config [[buffer(3)]],
+    constant RegexHeader& header [[buffer(4)]],
+    device AwkMatchResult* results [[buffer(5)]],
+    device atomic_uint* match_count [[buffer(6)]],
+    device const uint* line_offsets [[buffer(7)]],
+    device const uint* line_lengths [[buffer(8)]],
+    uint gid [[thread_position_in_grid]],
+    uint num_threads [[threads_per_grid]]
+) {
+    if (gid >= num_threads) return;
+
+    uint line_start = line_offsets[gid];
+    uint line_len = line_lengths[gid];
+    uint line_end = line_start + line_len;
+
+    bool invert_match = (config.flags & FLAG_INVERT_MATCH) != 0;
+
+    // Use regex_find to search for pattern in this line
+    uint match_start, match_end;
+    bool found = regex_find(
+        &header,
+        states,
+        bitmaps,
+        text + line_start,
+        line_len,
+        0,  // Start searching from beginning of line
+        &match_start,
+        &match_end
+    );
+
+    // Apply invert match
+    if (invert_match) found = !found;
+
+    if (found) {
+        uint idx = atomic_fetch_add_explicit(match_count, 1, memory_order_relaxed);
+        if (idx < config.max_results) {
+            results[idx].line_start = line_start;
+            results[idx].line_end = line_end;
+            results[idx].match_start = invert_match ? 0 : match_start;
+            results[idx].match_end = invert_match ? 0 : match_end;
+            results[idx].line_num = gid;
+            results[idx].field_count = 0;
+        }
+    }
+}
+
+// GPU-accelerated regex gsub - find all matches for substitution
+kernel void awk_regex_gsub(
+    device const uchar* text [[buffer(0)]],
+    constant RegexState* states [[buffer(1)]],
+    constant uint* bitmaps [[buffer(2)]],
+    constant AwkRegexConfig& config [[buffer(3)]],
+    constant RegexHeader& header [[buffer(4)]],
+    device RegexMatchResult* results [[buffer(5)]],
+    device atomic_uint* match_count [[buffer(6)]],
+    uint gid [[thread_position_in_grid]],
+    uint num_threads [[threads_per_grid]]
+) {
+    // Each thread handles a chunk of the text to find all regex matches
+    uint chunk_size = (config.text_len + num_threads - 1) / num_threads;
+    uint start_pos = gid * chunk_size;
+    uint end_pos = min(start_pos + chunk_size, config.text_len);
+
+    if (start_pos >= config.text_len) return;
+
+    uint pos = start_pos;
+    while (pos < end_pos) {
+        uint match_start, match_end;
+        bool found = regex_find(
+            &header,
+            states,
+            bitmaps,
+            text,
+            config.text_len,
+            pos,
+            &match_start,
+            &match_end
+        );
+
+        if (!found || match_start >= end_pos) break;
+
+        // Record this match
+        uint idx = atomic_fetch_add_explicit(match_count, 1, memory_order_relaxed);
+        if (idx < config.max_results) {
+            results[idx].start = match_start;
+            results[idx].end = match_end;
+            results[idx].pattern_idx = 0;
+            results[idx].flags = 1;  // FLAG_VALID
+        }
+
+        // Move past this match (avoid infinite loop on zero-width matches)
+        pos = (match_end > match_start) ? match_end : match_start + 1;
     }
 }

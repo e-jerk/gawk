@@ -15,6 +15,7 @@ pub const metal = if (build_options.is_macos) @import("metal.zig") else struct {
     pub const MetalAwk = void;
 };
 pub const vulkan = @import("vulkan.zig");
+pub const regex_compiler = @import("regex_compiler.zig");
 
 // Configuration
 pub const BATCH_SIZE: usize = 1024 * 1024;
@@ -71,6 +72,78 @@ pub const SubstitutionResult = extern struct {
     position: u32,
     match_len: u32,
     line_num: u32,
+    _pad: u32 = 0,
+};
+
+// ============================================================================
+// GPU Regex Types (match shader structs in regex_ops.h / regex_ops.glsl)
+// ============================================================================
+
+pub const MAX_REGEX_STATES: u32 = 256;
+pub const MAX_CAPTURE_GROUPS: u32 = 16;
+pub const BITMAP_WORDS_PER_CLASS: u32 = 8; // 256 bits = 8 x 32-bit words
+
+/// NFA state types - must match shader enums
+pub const RegexStateType = enum(u8) {
+    literal = 0, // Match single character
+    char_class = 1, // Match character class using bitmap
+    dot = 2, // Match any character except newline
+    split = 3, // Epsilon split to two states
+    match = 4, // Accept state
+    group_start = 5, // Capture group start
+    group_end = 6, // Capture group end
+    word_boundary = 7, // \b
+    not_word_boundary = 8, // \B
+    line_start = 9, // ^
+    line_end = 10, // $
+    any = 11, // . including newline
+};
+
+/// Compiled regex state (GPU-aligned, matches shader struct)
+pub const RegexState = extern struct {
+    type: u8, // RegexStateType
+    flags: u8, // case_insensitive, negated, etc.
+    out: u16, // Next state index
+    out2: u16, // Second output for split states
+    literal_char: u8, // For literal states
+    group_idx: u8, // For group_start/end
+    bitmap_offset: u32, // Offset into bitmap buffer for char_class
+
+    pub const FLAG_CASE_INSENSITIVE: u8 = 0x01;
+    pub const FLAG_NEGATED: u8 = 0x02;
+};
+
+/// Compiled regex header (uploaded with pattern)
+pub const RegexHeader = extern struct {
+    num_states: u32,
+    start_state: u32,
+    num_groups: u32,
+    flags: u32,
+
+    pub const FLAG_ANCHORED_START: u32 = 0x01;
+    pub const FLAG_ANCHORED_END: u32 = 0x02;
+    pub const FLAG_CASE_INSENSITIVE: u32 = 0x04;
+};
+
+/// GPU regex match result
+pub const RegexMatchResult = extern struct {
+    start: u32,
+    end: u32,
+    pattern_idx: u32,
+    flags: u32, // valid, etc.
+
+    pub const FLAG_VALID: u32 = 0x01;
+};
+
+/// AWK config extended for regex operations
+pub const AwkRegexConfig = extern struct {
+    text_len: u32,
+    num_states: u32,
+    start_state: u32,
+    header_flags: u32,
+    num_bitmaps: u32,
+    max_results: u32,
+    flags: u32, // Standard AwkFlags
     _pad: u32 = 0,
 };
 

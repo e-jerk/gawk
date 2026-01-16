@@ -191,6 +191,81 @@ pub fn main() !void {
         }
     }
 
+    // Regex tests (CPU)
+    std.debug.print("\n--- CPU Regex Tests ---\n", .{});
+
+    // Test 11: Simple regex pattern
+    {
+        const text = "hello world\nhello123\nworld456\n";
+        const pattern = "[0-9]+";
+        const options = AwkOptions{};
+
+        var result = try cpu.processAwkRegex(text, pattern, options, allocator);
+        defer result.deinit();
+
+        if (result.matches.len == 2) {
+            std.debug.print("Test 11: Regex [0-9]+ - PASS\n", .{});
+            passed += 1;
+        } else {
+            std.debug.print("Test 11: Regex [0-9]+ - FAIL (expected 2, got {d})\n", .{result.matches.len});
+            failed += 1;
+        }
+    }
+
+    // Test 12: Regex with quantifiers
+    {
+        const text = "helo\nhello\nhelllo\nheeeello\n";
+        const pattern = "hel+o";
+        const options = AwkOptions{};
+
+        var result = try cpu.processAwkRegex(text, pattern, options, allocator);
+        defer result.deinit();
+
+        if (result.matches.len == 3) { // hello, helllo, heeello matches hel+o
+            std.debug.print("Test 12: Regex hel+o - PASS\n", .{});
+            passed += 1;
+        } else {
+            std.debug.print("Test 12: Regex hel+o - FAIL (expected 3, got {d})\n", .{result.matches.len});
+            failed += 1;
+        }
+    }
+
+    // Test 13: Regex character class
+    {
+        const text = "cat\ndog\ncot\nbat\n";
+        const pattern = "[cd]o[gt]";
+        const options = AwkOptions{};
+
+        var result = try cpu.processAwkRegex(text, pattern, options, allocator);
+        defer result.deinit();
+
+        if (result.matches.len == 2) { // dog, cot
+            std.debug.print("Test 13: Regex [cd]o[gt] - PASS\n", .{});
+            passed += 1;
+        } else {
+            std.debug.print("Test 13: Regex [cd]o[gt] - FAIL (expected 2, got {d})\n", .{result.matches.len});
+            failed += 1;
+        }
+    }
+
+    // Test 14: Regex alternation
+    {
+        const text = "error line\nwarning here\ninfo msg\nerror again\n";
+        const pattern = "error|warning";
+        const options = AwkOptions{};
+
+        var result = try cpu.processAwkRegex(text, pattern, options, allocator);
+        defer result.deinit();
+
+        if (result.matches.len == 3) {
+            std.debug.print("Test 14: Regex error|warning - PASS\n", .{});
+            passed += 1;
+        } else {
+            std.debug.print("Test 14: Regex error|warning - FAIL (expected 3, got {d})\n", .{result.matches.len});
+            failed += 1;
+        }
+    }
+
     // GPU tests (if available)
     if (build_options.is_macos) {
         std.debug.print("\n--- Metal GPU Tests ---\n", .{});
@@ -220,6 +295,60 @@ pub fn main() !void {
         }
     }
 
+    // Metal Regex tests
+    if (build_options.is_macos) {
+        std.debug.print("\n--- Metal GPU Regex Tests ---\n", .{});
+        if (gpu.metal.MetalAwk.init(allocator)) |searcher| {
+            defer searcher.deinit();
+
+            // Test 15: Metal regex [0-9]+
+            {
+                const text = "hello world\nhello123\nworld456\n";
+                const pattern = "[0-9]+";
+                const options = AwkOptions{};
+
+                if (searcher.processAwkRegex(text, pattern, options, allocator)) |res| {
+                    var result = res;
+                    defer result.deinit();
+                    if (result.matches.len == 2) {
+                        std.debug.print("Metal Regex: [0-9]+ - PASS\n", .{});
+                        passed += 1;
+                    } else {
+                        std.debug.print("Metal Regex: [0-9]+ - FAIL (expected 2, got {d})\n", .{result.matches.len});
+                        failed += 1;
+                    }
+                } else |err| {
+                    std.debug.print("Metal Regex: [0-9]+ - FAIL ({s})\n", .{@errorName(err)});
+                    failed += 1;
+                }
+            }
+
+            // Test 16: Metal regex alternation
+            {
+                const text = "error line\nwarning here\ninfo msg\nerror again\n";
+                const pattern = "error|warning";
+                const options = AwkOptions{};
+
+                if (searcher.processAwkRegex(text, pattern, options, allocator)) |res| {
+                    var result = res;
+                    defer result.deinit();
+                    if (result.matches.len == 3) {
+                        std.debug.print("Metal Regex: error|warning - PASS\n", .{});
+                        passed += 1;
+                    } else {
+                        std.debug.print("Metal Regex: error|warning - FAIL (expected 3, got {d})\n", .{result.matches.len});
+                        failed += 1;
+                    }
+                } else |err| {
+                    std.debug.print("Metal Regex: error|warning - FAIL ({s})\n", .{@errorName(err)});
+                    failed += 1;
+                }
+            }
+        } else |err| {
+            std.debug.print("Metal Regex: Init failed ({s}) - SKIP\n", .{@errorName(err)});
+        }
+    }
+
     // Vulkan tests
     std.debug.print("\n--- Vulkan GPU Tests ---\n", .{});
     if (gpu.vulkan.VulkanAwk.init(allocator)) |searcher| {
@@ -245,6 +374,58 @@ pub fn main() !void {
         }
     } else |err| {
         std.debug.print("Vulkan: Init failed ({s}) - SKIP\n", .{@errorName(err)});
+    }
+
+    // Vulkan Regex tests
+    std.debug.print("\n--- Vulkan GPU Regex Tests ---\n", .{});
+    if (gpu.vulkan.VulkanAwk.init(allocator)) |searcher| {
+        defer searcher.deinit();
+
+        // Test 17: Vulkan regex [0-9]+
+        {
+            const text = "hello world\nhello123\nworld456\n";
+            const pattern = "[0-9]+";
+            const options = AwkOptions{};
+
+            if (searcher.processAwkRegex(text, pattern, options, allocator)) |res| {
+                var result = res;
+                defer result.deinit();
+                if (result.matches.len == 2) {
+                    std.debug.print("Vulkan Regex: [0-9]+ - PASS\n", .{});
+                    passed += 1;
+                } else {
+                    std.debug.print("Vulkan Regex: [0-9]+ - FAIL (expected 2, got {d})\n", .{result.matches.len});
+                    failed += 1;
+                }
+            } else |err| {
+                std.debug.print("Vulkan Regex: [0-9]+ - FAIL ({s})\n", .{@errorName(err)});
+                failed += 1;
+            }
+        }
+
+        // Test 18: Vulkan regex alternation
+        {
+            const text = "error line\nwarning here\ninfo msg\nerror again\n";
+            const pattern = "error|warning";
+            const options = AwkOptions{};
+
+            if (searcher.processAwkRegex(text, pattern, options, allocator)) |res| {
+                var result = res;
+                defer result.deinit();
+                if (result.matches.len == 3) {
+                    std.debug.print("Vulkan Regex: error|warning - PASS\n", .{});
+                    passed += 1;
+                } else {
+                    std.debug.print("Vulkan Regex: error|warning - FAIL (expected 3, got {d})\n", .{result.matches.len});
+                    failed += 1;
+                }
+            } else |err| {
+                std.debug.print("Vulkan Regex: error|warning - FAIL ({s})\n", .{@errorName(err)});
+                failed += 1;
+            }
+        }
+    } else |err| {
+        std.debug.print("Vulkan Regex: Init failed ({s}) - SKIP\n", .{@errorName(err)});
     }
 
     std.debug.print("\n====== SUMMARY ======\n", .{});

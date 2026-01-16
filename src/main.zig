@@ -4,6 +4,10 @@ const gpu = @import("gpu");
 const cpu = @import("cpu");
 const cpu_gnu = @import("cpu_gnu");
 const regex = @import("regex");
+const parser = @import("parser.zig");
+const evaluator = @import("evaluator.zig");
+const Value = @import("value.zig").Value;
+const ast = @import("ast.zig");
 
 const AwkOptions = gpu.AwkOptions;
 const isRegexPattern = regex.isRegexPattern;
@@ -30,6 +34,7 @@ pub fn main() !u8 {
     var special_var: SpecialVar = .none;
     var allocated_fields: ?[]const u32 = null;
     defer if (allocated_fields) |f| allocator.free(f);
+    var program_text: []const u8 = ""; // Original AWK program for full parsing
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -61,6 +66,7 @@ pub fn main() !u8 {
         } else if (arg[0] != '-') {
             // First non-option is pattern/action or file
             if (pattern.len == 0 and action.len == 0) {
+                program_text = arg; // Save original program for full parsing
                 // Parse AWK program: /pattern/ or /pattern/ {action} or {action}
                 const parsed = try parseAwkProgram(arg, allocator, &options);
                 pattern = parsed.pattern;
@@ -124,6 +130,18 @@ pub fn main() !u8 {
     }
     defer text_allocator.free(text);
 
+    // Check if program needs full parser/evaluator for complex AWK features
+    if (needsFullParser(program_text)) {
+        if (verbose) std.debug.print("Using full AWK parser/evaluator\n", .{});
+        const output = executeFullAwk(program_text, text, options.field_separator, allocator) catch |err| {
+            std.debug.print("gawk: error executing program: {}\n", .{err});
+            return 1;
+        };
+        defer allocator.free(output);
+        _ = std.posix.write(std.posix.STDOUT_FILENO, output) catch {};
+        return 0;
+    }
+
     // Handle substitution mode (gsub)
     if (is_substitution) {
         // Check if pattern contains regex metacharacters
@@ -152,8 +170,8 @@ pub fn main() !u8 {
     // Check if pattern contains regex metacharacters
     const use_regex = pattern.len > 0 and isRegexPattern(pattern);
 
-    // Select backend (GPU backends don't support regex yet, fall back to CPU)
-    const backend = if (use_regex) gpu.Backend.cpu else selectBackend(backend_mode, text.len, verbose);
+    // Select backend - GPU now supports regex via NFA state machine
+    const backend = selectBackend(backend_mode, text.len, verbose);
 
     // Process AWK
     var result = switch (backend) {
@@ -161,23 +179,48 @@ pub fn main() !u8 {
             if (build_options.is_macos) {
                 const searcher = gpu.metal.MetalAwk.init(allocator) catch |err| {
                     if (verbose) std.debug.print("Metal init failed: {}, falling back to CPU\n", .{err});
-                    break :blk try cpu.processAwk(text, pattern, options, allocator);
+                    break :blk if (use_regex)
+                        try cpu.processAwkRegex(text, pattern, options, allocator)
+                    else
+                        try cpu.processAwk(text, pattern, options, allocator);
                 };
                 defer searcher.deinit();
-                break :blk searcher.processAwk(text, pattern, options, allocator) catch |err| {
-                    if (verbose) std.debug.print("Metal failed: {}, falling back to CPU\n", .{err});
-                    break :blk try cpu.processAwk(text, pattern, options, allocator);
-                };
+
+                // Use GPU regex if pattern has metacharacters
+                if (use_regex) {
+                    break :blk searcher.processAwkRegex(text, pattern, options, allocator) catch |err| {
+                        if (verbose) std.debug.print("Metal regex failed: {}, falling back to CPU\n", .{err});
+                        break :blk try cpu.processAwkRegex(text, pattern, options, allocator);
+                    };
+                } else {
+                    break :blk searcher.processAwk(text, pattern, options, allocator) catch |err| {
+                        if (verbose) std.debug.print("Metal failed: {}, falling back to CPU\n", .{err});
+                        break :blk try cpu.processAwk(text, pattern, options, allocator);
+                    };
+                }
             } else {
-                break :blk try cpu.processAwk(text, pattern, options, allocator);
+                break :blk if (use_regex)
+                    try cpu.processAwkRegex(text, pattern, options, allocator)
+                else
+                    try cpu.processAwk(text, pattern, options, allocator);
             }
         },
         .vulkan => blk: {
             const searcher = gpu.vulkan.VulkanAwk.init(allocator) catch |err| {
                 if (verbose) std.debug.print("Vulkan init failed: {}, falling back to CPU\n", .{err});
-                break :blk try cpu.processAwk(text, pattern, options, allocator);
+                break :blk if (use_regex)
+                    try cpu.processAwkRegex(text, pattern, options, allocator)
+                else
+                    try cpu.processAwk(text, pattern, options, allocator);
             };
             defer searcher.deinit();
+            // Use GPU regex if pattern has metacharacters
+            if (use_regex) {
+                break :blk searcher.processAwkRegex(text, pattern, options, allocator) catch |err| {
+                    if (verbose) std.debug.print("Vulkan regex failed: {}, falling back to CPU\n", .{err});
+                    break :blk try cpu.processAwkRegex(text, pattern, options, allocator);
+                };
+            }
             break :blk searcher.processAwk(text, pattern, options, allocator) catch |err| {
                 if (verbose) std.debug.print("Vulkan failed: {}, falling back to CPU\n", .{err});
                 break :blk try cpu.processAwk(text, pattern, options, allocator);
@@ -606,4 +649,127 @@ fn printHelp() void {
         \\
     ;
     std.debug.print("{s}", .{help});
+}
+
+/// Check if an AWK program needs the full parser/evaluator
+/// Returns true for complex programs with:
+/// - BEGIN/END blocks
+/// - Multiple rules
+/// - Variables and arithmetic
+/// - Control flow (if/while/for)
+/// - User-defined functions
+fn needsFullParser(program: []const u8) bool {
+    // Keywords that indicate complex programs
+    const complex_keywords = [_][]const u8{
+        "BEGIN",
+        "END",
+        "if",
+        "else",
+        "while",
+        "for",
+        "function",
+        "return",
+        "break",
+        "continue",
+        "next",
+        "exit",
+        "delete",
+        "printf",
+    };
+
+    for (complex_keywords) |kw| {
+        if (std.mem.indexOf(u8, program, kw) != null) {
+            return true;
+        }
+    }
+
+    // Check for variable assignments (x = ..., not == comparison)
+    var i: usize = 0;
+    while (i < program.len) {
+        // Skip strings
+        if (program[i] == '"') {
+            i += 1;
+            while (i < program.len and program[i] != '"') {
+                if (program[i] == '\\' and i + 1 < program.len) i += 1;
+                i += 1;
+            }
+            if (i < program.len) i += 1;
+            continue;
+        }
+
+        // Skip regexes
+        if (program[i] == '/') {
+            i += 1;
+            while (i < program.len and program[i] != '/') {
+                if (program[i] == '\\' and i + 1 < program.len) i += 1;
+                i += 1;
+            }
+            if (i < program.len) i += 1;
+            continue;
+        }
+
+        // Check for assignment (identifier followed by = but not ==)
+        if (std.ascii.isAlphabetic(program[i]) or program[i] == '_') {
+            const ident_start = i;
+            while (i < program.len and (std.ascii.isAlphanumeric(program[i]) or program[i] == '_')) {
+                i += 1;
+            }
+
+            // Skip whitespace
+            while (i < program.len and (program[i] == ' ' or program[i] == '\t')) i += 1;
+
+            // Check for assignment operators
+            if (i < program.len and program[i] == '=' and (i + 1 >= program.len or program[i + 1] != '=')) {
+                // It's an assignment - check if it's not inside gsub()
+                const before = program[0..ident_start];
+                if (std.mem.indexOf(u8, before, "gsub(") == null and
+                    std.mem.indexOf(u8, before, "sub(") == null)
+                {
+                    return true;
+                }
+            }
+
+            // Check for compound assignment
+            if (i + 1 < program.len and
+                (std.mem.eql(u8, program[i .. i + 2], "+=") or
+                std.mem.eql(u8, program[i .. i + 2], "-=") or
+                std.mem.eql(u8, program[i .. i + 2], "*=") or
+                std.mem.eql(u8, program[i .. i + 2], "/=") or
+                std.mem.eql(u8, program[i .. i + 2], "%=") or
+                std.mem.eql(u8, program[i .. i + 2], "^=")))
+            {
+                return true;
+            }
+        }
+
+        i += 1;
+    }
+
+    // Check for multiple action blocks (more than one { })
+    var brace_count: u32 = 0;
+    for (program) |c| {
+        if (c == '{') brace_count += 1;
+    }
+    if (brace_count > 1) return true;
+
+    return false;
+}
+
+/// Execute a complex AWK program using the full parser/evaluator
+fn executeFullAwk(program_text: []const u8, input: []const u8, field_separator: []const u8, allocator: std.mem.Allocator) ![]const u8 {
+    var p = parser.Parser.init(program_text, allocator);
+    var program = p.parse() catch {
+        return error.ParseError;
+    };
+    defer program.deinit();
+
+    var eval = evaluator.Evaluator.init(allocator, &program.functions);
+    defer eval.deinit();
+
+    // Set field separator if provided
+    if (!std.mem.eql(u8, field_separator, " \t")) {
+        eval.field_separator = field_separator;
+    }
+
+    return eval.execute(&program, input);
 }

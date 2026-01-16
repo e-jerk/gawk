@@ -79,15 +79,18 @@ gawk -V '/pattern/' file.txt
 | `tolower($N)` | ✓ | ✓ | ✓ | ✓ | **Native** |
 | `NR` (line number) | ✓ | ✓ | ✓ | ✓ | **Native** |
 | `NF` (field count) | ✓ | ✓ | ✓ | ✓ | **Native** |
-| Regex patterns | — | ✓ | — | — | GNU fallback |
-| `BEGIN/END` blocks | — | ✓ | — | — | GNU fallback |
-| Variables | — | ✓ | — | — | GNU fallback |
-| User-defined functions | — | ✓ | — | — | GNU fallback |
-| Multiple patterns | — | ✓ | — | — | GNU fallback |
-| Arithmetic expressions | — | ✓ | — | — | GNU fallback |
-| Conditionals | — | ✓ | — | — | GNU fallback |
+| Regex patterns `/[a-z]+/` | ✓ | ✓ | ✓ | ✓ | **Native** |
+| `BEGIN/END` blocks | ✓ | ✓ | — | — | **Native** |
+| Variables `x=5` | ✓ | ✓ | — | — | **Native** |
+| User-defined functions | ✓ | ✓ | — | — | **Native** |
+| Multiple patterns | ✓ | ✓ | — | — | **Native** |
+| Arithmetic expressions | ✓ | ✓ | — | — | **Native** |
+| Conditionals `if/else` | ✓ | ✓ | — | — | **Native** |
+| Loops `while/for` | ✓ | ✓ | — | — | **Native** |
+| Arrays `a[i]` | ✓ | ✓ | — | — | **Native** |
+| `printf/sprintf` | ✓ | ✓ | — | — | **Native** |
 
-**Test Coverage**: 32/32 GNU compatibility tests passing
+**Test Coverage**: 32/32 GNU compatibility tests passing, 16+ smoke tests including regex
 
 **Backend Parity**: CPU, Metal, and Vulkan produce identical results for all features.
 
@@ -179,6 +182,15 @@ The CPU backend provides SIMD-optimized AWK processing:
 - **Field Extraction**: Parallel whitespace detection for field boundaries
 - **Atomic Counters**: Thread-safe match and field counting
 - **Field Count**: Populated during CPU-side field splitting for NF support
+- **GPU Regex**: Thompson NFA execution via `regex_find()` from `regex_ops.h`
+
+**GPU Regex Implementation**:
+
+The regex engine uses Thompson NFA (Non-deterministic Finite Automaton) execution:
+- `regex_compiler.zig`: Converts CPU regex to GPU-compatible format
+- State machine uses 256-bit bitmask (8 x uint32) for active state tracking
+- Supports: character classes `[a-z]`, quantifiers `+*?`, alternation `|`, groups `()`
+- `awk_regex_match` kernel: Per-line regex matching with atomic result counting
 
 **Vulkan Shader (`src/shaders/awk.comp`)**:
 
@@ -187,6 +199,7 @@ The CPU backend provides SIMD-optimized AWK processing:
 - **Workgroup Size**: 64 threads (`local_size_x = 64`)
 - **Packed Word Access**: Efficient unaligned 4-byte reads
 - **Field Count**: Populated during CPU-side field splitting for NF support
+- **GPU Regex**: Thompson NFA execution via `regex_ops.glsl` (same algorithm as Metal)
 
 ### Processing Pipeline
 
@@ -258,15 +271,28 @@ FieldInfo = struct {
 
 ## Performance
 
+### Literal Pattern Matching
+
 | Operation | CPU | GPU | Speedup |
 |-----------|-----|-----|---------|
-| Pattern match | 357 MB/s | 476 MB/s | **1.3x** |
+| Pattern match | 477 MB/s | 287 MB/s | 0.6x |
 | Field extraction | ~300 MB/s | ~400 MB/s | **1.3x** |
 | Case-insensitive | ~350 MB/s | ~450 MB/s | **1.3x** |
 
-*Results measured on Apple M1 Max with 10MB test files.*
+Note: For simple literal patterns, CPU SIMD (Boyer-Moore-Horspool) is faster than GPU due to dispatch overhead. GPU wins on larger files (>10MB) and complex patterns.
 
-Note: GPU speedup for gawk is modest because the workload involves complex field splitting that currently runs on CPU. Pattern matching benefits from GPU parallelism, while field extraction is optimized for CPU SIMD.
+### Regex Pattern Matching
+
+| Pattern | CPU Regex | GPU (Metal/Vulkan) | Speedup |
+|---------|-----------|-------------------|---------|
+| `[0-9]+` | 10,266 ms | 6-8 ms | **~1,500x** |
+| `hel+o` | 157 ms | 5-7 ms | **~25x** |
+| `[a-z]+@[a-z]+` | 10,709 ms | 6-10 ms | **~1,500x** |
+| `error\|warning` | 8,350 ms | 6-8 ms | **~1,200x** |
+
+*Results measured on Apple M1 Max with 1MB test data, 3 iterations.*
+
+The GPU regex engine uses Thompson NFA execution which is massively parallel - each thread processes one line independently. Metal and Vulkan have equivalent performance (Vulkan uses MoltenVK on macOS which translates to Metal).
 
 ## Requirements
 
@@ -281,18 +307,21 @@ zig build -Doptimize=ReleaseFast
 
 # Run tests
 zig build test      # Unit tests
-zig build smoke     # Integration tests (GPU verification)
-zig build bench     # Benchmarks
+zig build smoke     # Integration tests (20 tests, GPU verification)
+zig build bench     # Benchmarks (literal patterns)
+zig build bench -- --regex  # Regex benchmarks (CPU vs GPU)
 bash gnu-tests.sh   # GNU compatibility tests (32 tests)
 ```
 
 ## Recent Changes
 
-- **Built-in Functions**: Native `length()`, `substr()`, `index()`, `toupper()`, `tolower()`
+- **100% Native AWK**: Full AWK parser/evaluator for complex programs - no GNU fallback needed
+- **Native Features**: BEGIN/END blocks, variables, user-defined functions, if/else, while/for loops, arrays, printf/sprintf
+- **GPU Regex Support**: Native Thompson NFA regex execution on both Metal and Vulkan GPUs for patterns like `/[0-9]+/`, `/error|warning/`, `/hel+o/`
+- **Built-in Functions**: Native `length()`, `substr()`, `index()`, `toupper()`, `tolower()`, `split()`, `sin()`, `cos()`, `sqrt()`, `int()`, `log()`, `exp()`
 - **Special Variables**: Native `NR` (line number) and `NF` (field count) support
-- **Backend Parity**: CPU, Metal, and Vulkan now produce identical results
-- **Field Count Fix**: GPU backends properly track `field_count` for NF variable
-- **Test Coverage**: 32 GNU compatibility tests passing
+- **Backend Parity**: CPU, Metal, and Vulkan now produce identical results for pattern matching
+- **Test Coverage**: 32 GNU compatibility tests passing, 20 smoke tests (including CPU, Metal, and Vulkan regex)
 
 ## License
 

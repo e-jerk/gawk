@@ -18,6 +18,7 @@ pub fn main() !void {
     var file_size: usize = 10 * 1024 * 1024; // 10MB
     var pattern: []const u8 = "the";
     var iterations: usize = 5;
+    var run_regex: bool = false;
 
     // Parse arguments
     var i: usize = 1;
@@ -31,6 +32,8 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, args[i], "--iterations") and i + 1 < args.len) {
             i += 1;
             iterations = try std.fmt.parseInt(usize, args[i], 10);
+        } else if (std.mem.eql(u8, args[i], "--regex")) {
+            run_regex = true;
         }
     }
 
@@ -150,6 +153,11 @@ pub fn main() !void {
     }
 
     std.debug.print("Vulkan: {d} matches - {s}\n", .{ vulkan_matches, if (vulkan_matches == expected_matches) "PASS" else "FAIL" });
+
+    // Run regex benchmarks if requested
+    if (run_regex) {
+        try runRegexBenchmarks(allocator, file_size, iterations);
+    }
 }
 
 fn generateTestData(allocator: std.mem.Allocator, size: usize) ![]u8 {
@@ -278,4 +286,163 @@ fn minimum(times: []u64) f64 {
         min = t;
     };
     return @as(f64, @floatFromInt(min));
+}
+
+// ========== REGEX BENCHMARKS ==========
+
+fn benchmarkCpuRegex(text: []const u8, pattern: []const u8, options: AwkOptions, allocator: std.mem.Allocator, iterations: usize) ![]u64 {
+    var times = try allocator.alloc(u64, iterations);
+
+    for (0..iterations) |i| {
+        var timer = try std.time.Timer.start();
+        var result = try cpu.processAwkRegex(text, pattern, options, allocator);
+        times[i] = timer.read() / std.time.ns_per_ms;
+        result.deinit();
+    }
+
+    return times;
+}
+
+fn benchmarkMetalRegex(text: []const u8, pattern: []const u8, options: AwkOptions, allocator: std.mem.Allocator, iterations: usize) !?BenchmarkResult {
+    if (!build_options.is_macos) return null;
+
+    var searcher = gpu.metal.MetalAwk.init(allocator) catch return null;
+    defer searcher.deinit();
+
+    var times = try allocator.alloc(u64, iterations);
+    var last_matches: u64 = 0;
+
+    for (0..iterations) |i| {
+        var timer = try std.time.Timer.start();
+        var result = searcher.processAwkRegex(text, pattern, options, allocator) catch {
+            allocator.free(times);
+            return null;
+        };
+        times[i] = timer.read() / std.time.ns_per_ms;
+        last_matches = result.matches.len;
+        result.deinit();
+    }
+
+    return BenchmarkResult{ .times = times, .matches = last_matches };
+}
+
+fn benchmarkVulkanRegex(text: []const u8, pattern: []const u8, options: AwkOptions, allocator: std.mem.Allocator, iterations: usize) !?BenchmarkResult {
+    var searcher = gpu.vulkan.VulkanAwk.init(allocator) catch return null;
+    defer searcher.deinit();
+
+    var times = try allocator.alloc(u64, iterations);
+    var last_matches: u64 = 0;
+
+    for (0..iterations) |i| {
+        var timer = try std.time.Timer.start();
+        var result = searcher.processAwkRegex(text, pattern, options, allocator) catch {
+            allocator.free(times);
+            return null;
+        };
+        times[i] = timer.read() / std.time.ns_per_ms;
+        last_matches = result.matches.len;
+        result.deinit();
+    }
+
+    return BenchmarkResult{ .times = times, .matches = last_matches };
+}
+
+pub fn runRegexBenchmarks(allocator: std.mem.Allocator, file_size: usize, iterations: usize) !void {
+    std.debug.print("\n====== REGEX BENCHMARK ======\n\n", .{});
+
+    // Generate test data with numbers and mixed content
+    const text = try generateRegexTestData(allocator, file_size);
+    defer allocator.free(text);
+
+    // Test patterns
+    const patterns = [_][]const u8{
+        "[0-9]+",
+        "hel+o",
+        "[a-z]+@[a-z]+",
+        "error|warning",
+    };
+
+    const pattern_names = [_][]const u8{
+        "numbers [0-9]+",
+        "literal+ hel+o",
+        "email-like",
+        "alternation",
+    };
+
+    const options = AwkOptions{};
+
+    for (patterns, 0..) |pattern, idx| {
+        std.debug.print("\nPattern: {s}\n", .{pattern_names[idx]});
+        std.debug.print("{s:<12} {s:>12} {s:>12} {s:>10}\n", .{ "Backend", "Avg (ms)", "Min (ms)", "Matches" });
+        std.debug.print("{s:<12} {s:>12} {s:>12} {s:>10}\n", .{ "------------", "------------", "------------", "----------" });
+
+        // CPU Regex
+        var cpu_warmup = try cpu.processAwkRegex(text, pattern, options, allocator);
+        const expected_matches = cpu_warmup.matches.len;
+        cpu_warmup.deinit();
+
+        const cpu_times = try benchmarkCpuRegex(text, pattern, options, allocator, iterations);
+        defer allocator.free(cpu_times);
+
+        const cpu_avg = average(cpu_times);
+        const cpu_min = minimum(cpu_times);
+        std.debug.print("{s:<12} {d:>12.1} {d:>12.1} {d:>10}\n", .{ "CPU-Regex", cpu_avg, cpu_min, expected_matches });
+
+        // Metal Regex (macOS only)
+        if (build_options.is_macos) {
+            const metal_result = benchmarkMetalRegex(text, pattern, options, allocator, iterations) catch null;
+            if (metal_result) |result| {
+                defer allocator.free(result.times);
+                const metal_avg = average(result.times);
+                const metal_min = minimum(result.times);
+                const speedup = cpu_avg / metal_avg;
+                std.debug.print("{s:<12} {d:>12.1} {d:>12.1} {d:>10} ({d:.1}x)\n", .{ "Metal-Regex", metal_avg, metal_min, result.matches, speedup });
+            } else {
+                std.debug.print("{s:<12} {s:>12}\n", .{ "Metal-Regex", "unavailable" });
+            }
+        }
+
+        // Vulkan Regex
+        const vulkan_result = benchmarkVulkanRegex(text, pattern, options, allocator, iterations) catch null;
+        if (vulkan_result) |result| {
+            defer allocator.free(result.times);
+            const vulkan_avg = average(result.times);
+            const vulkan_min = minimum(result.times);
+            const speedup = cpu_avg / vulkan_avg;
+            std.debug.print("{s:<12} {d:>12.1} {d:>12.1} {d:>10} ({d:.1}x)\n", .{ "Vulkan-Regex", vulkan_avg, vulkan_min, result.matches, speedup });
+        } else {
+            std.debug.print("{s:<12} {s:>12}\n", .{ "Vulkan-Regex", "unavailable" });
+        }
+    }
+}
+
+fn generateRegexTestData(allocator: std.mem.Allocator, size: usize) ![]u8 {
+    const templates = [_][]const u8{
+        "hello world code 123 process",
+        "error: failed with code 456",
+        "warning: possible issue at line 789",
+        "user@example test email hello",
+        "info: processing heello item 42",
+        "debug: value=999 status=ok",
+        "the quick brown fox 12345",
+        "system helllo alert warning 0",
+    };
+
+    var data = try allocator.alloc(u8, size);
+    var pos: usize = 0;
+    var prng = std.Random.DefaultPrng.init(42);
+    const rng = prng.random();
+
+    while (pos < size) {
+        const template = templates[rng.intRangeAtMost(usize, 0, templates.len - 1)];
+        const copy_len = @min(template.len, size - pos);
+        @memcpy(data[pos..][0..copy_len], template[0..copy_len]);
+        pos += copy_len;
+        if (pos < size) {
+            data[pos] = '\n';
+            pos += 1;
+        }
+    }
+
+    return data;
 }

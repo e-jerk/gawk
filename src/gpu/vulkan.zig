@@ -9,9 +9,13 @@ const AwkMatchResult = mod.AwkMatchResult;
 const FieldInfo = mod.FieldInfo;
 const AwkOptions = mod.AwkOptions;
 const AwkResult = mod.AwkResult;
+const AwkRegexConfig = mod.AwkRegexConfig;
+const RegexState = mod.RegexState;
 const MAX_RESULTS = mod.MAX_RESULTS;
 const MAX_FIELDS = mod.MAX_FIELDS;
 const MAX_GPU_BUFFER_SIZE = mod.MAX_GPU_BUFFER_SIZE;
+
+const regex_compiler = @import("regex_compiler.zig");
 
 const VulkanLoader = struct {
     lib: std.DynLib,
@@ -53,6 +57,8 @@ pub const VulkanAwk = struct {
     descriptor_set_layout: vk.DescriptorSetLayout,
     pipeline_layout: vk.PipelineLayout,
     compute_pipeline: vk.Pipeline,
+    regex_shader_module: vk.ShaderModule,
+    regex_compute_pipeline: vk.Pipeline,
     descriptor_pool: vk.DescriptorPool,
     shader_module: vk.ShaderModule,
     command_pool: vk.CommandPool,
@@ -164,6 +170,19 @@ pub const VulkanAwk = struct {
         }), null, @ptrCast(&compute_pipeline)) catch return error.ComputePipelineCreationFailed;
         errdefer vkd.destroyPipeline(device, compute_pipeline, null);
 
+        // Create regex shader module and pipeline
+        const regex_shader_module = vkd.createShaderModule(device, &.{ .code_size = spirv.EMBEDDED_SPIRV_REGEX.len, .p_code = @ptrCast(@alignCast(spirv.EMBEDDED_SPIRV_REGEX.ptr)) }, null) catch return error.ShaderModuleCreationFailed;
+        errdefer vkd.destroyShaderModule(device, regex_shader_module, null);
+
+        var regex_compute_pipeline: vk.Pipeline = undefined;
+        _ = vkd.createComputePipelines(device, .null_handle, 1, @ptrCast(&vk.ComputePipelineCreateInfo{
+            .stage = .{ .stage = .{ .compute_bit = true }, .module = regex_shader_module, .p_name = "main", .p_specialization_info = null },
+            .layout = pipeline_layout,
+            .base_pipeline_handle = .null_handle,
+            .base_pipeline_index = -1,
+        }), null, @ptrCast(&regex_compute_pipeline)) catch return error.ComputePipelineCreationFailed;
+        errdefer vkd.destroyPipeline(device, regex_compute_pipeline, null);
+
         const descriptor_pool = vkd.createDescriptorPool(device, &.{ .max_sets = 1, .pool_size_count = 1, .p_pool_sizes = @ptrCast(&vk.DescriptorPoolSize{ .type = .storage_buffer, .descriptor_count = 8 }) }, null) catch return error.DescriptorPoolCreationFailed;
         errdefer vkd.destroyDescriptorPool(device, descriptor_pool, null);
 
@@ -213,6 +232,8 @@ pub const VulkanAwk = struct {
             .descriptor_set_layout = descriptor_set_layout,
             .pipeline_layout = pipeline_layout,
             .compute_pipeline = compute_pipeline,
+            .regex_shader_module = regex_shader_module,
+            .regex_compute_pipeline = regex_compute_pipeline,
             .descriptor_pool = descriptor_pool,
             .shader_module = shader_module,
             .command_pool = command_pool,
@@ -232,9 +253,11 @@ pub const VulkanAwk = struct {
         self.vkd.destroyCommandPool(self.device, self.command_pool, null);
         self.vkd.destroyDescriptorPool(self.device, self.descriptor_pool, null);
         self.vkd.destroyPipeline(self.device, self.compute_pipeline, null);
+        self.vkd.destroyPipeline(self.device, self.regex_compute_pipeline, null);
         self.vkd.destroyPipelineLayout(self.device, self.pipeline_layout, null);
         self.vkd.destroyDescriptorSetLayout(self.device, self.descriptor_set_layout, null);
         self.vkd.destroyShaderModule(self.device, self.shader_module, null);
+        self.vkd.destroyShaderModule(self.device, self.regex_shader_module, null);
         self.vkd.destroyDevice(self.device, null);
         self.vki.destroyInstance(self.instance, null);
         self.allocator.destroy(self);
@@ -378,6 +401,236 @@ pub const VulkanAwk = struct {
 
         self.vkd.beginCommandBuffer(command_buffer, &.{ .flags = .{ .one_time_submit_bit = true } }) catch return error.CommandBufferBeginFailed;
         self.vkd.cmdBindPipeline(command_buffer, .compute, self.compute_pipeline);
+        self.vkd.cmdBindDescriptorSets(command_buffer, .compute, self.pipeline_layout, 0, 1, @ptrCast(&descriptor_set), 0, undefined);
+
+        const workgroups = @max(1, (num_lines + 63) / 64);
+        self.vkd.cmdDispatch(command_buffer, @intCast(workgroups), 1, 1);
+        self.vkd.endCommandBuffer(command_buffer) catch return error.CommandBufferEndFailed;
+
+        self.vkd.queueSubmit(self.compute_queue, 1, @ptrCast(&vk.SubmitInfo{
+            .wait_semaphore_count = 0,
+            .p_wait_semaphores = undefined,
+            .p_wait_dst_stage_mask = undefined,
+            .command_buffer_count = 1,
+            .p_command_buffers = @ptrCast(&command_buffer),
+            .signal_semaphore_count = 0,
+            .p_signal_semaphores = undefined,
+        }), self.fence) catch return error.QueueSubmitFailed;
+        _ = self.vkd.waitForFences(self.device, 1, @ptrCast(&self.fence), .true, std.math.maxInt(u64)) catch return error.FenceWaitFailed;
+        self.vkd.resetFences(self.device, 1, @ptrCast(&self.fence)) catch return error.FenceResetFailed;
+
+        const match_count = counters_ptr[0];
+
+        const num_to_copy = @min(match_count, MAX_RESULTS);
+        const matches = try allocator.alloc(AwkMatchResult, num_to_copy);
+        if (num_to_copy > 0) @memcpy(matches, @as([*]AwkMatchResult, @ptrCast(@alignCast(results_buffer.mapped)))[0..num_to_copy]);
+
+        self.vkd.resetDescriptorPool(self.device, self.descriptor_pool, .{}) catch {};
+
+        // Field splitting on CPU and update field_count for NF support
+        var fields: std.ArrayListUnmanaged(FieldInfo) = .{};
+        for (matches, 0..) |*match, idx| {
+            const line = text[match.line_start..match.line_end];
+            var field_idx: u32 = 1;
+            var field_start: u32 = 0;
+            var in_field = false;
+
+            for (line, 0..) |c, i| {
+                var is_sep = false;
+                for (options.field_separator) |s| {
+                    if (c == s) {
+                        is_sep = true;
+                        break;
+                    }
+                }
+
+                if (!is_sep and !in_field) {
+                    in_field = true;
+                    field_start = @intCast(i);
+                } else if (is_sep and in_field) {
+                    try fields.append(allocator, .{
+                        .line_idx = @intCast(idx),
+                        .field_idx = field_idx,
+                        .start_offset = field_start,
+                        .end_offset = @intCast(i),
+                    });
+                    field_idx += 1;
+                    in_field = false;
+                }
+            }
+
+            if (in_field) {
+                try fields.append(allocator, .{
+                    .line_idx = @intCast(idx),
+                    .field_idx = field_idx,
+                    .start_offset = field_start,
+                    .end_offset = @intCast(line.len),
+                });
+                field_idx += 1;
+            }
+
+            // Update field_count for NF variable support
+            match.field_count = field_idx - 1;
+        }
+
+        return AwkResult{
+            .matches = matches,
+            .fields = try fields.toOwnedSlice(allocator),
+            .total_matches = match_count,
+            .total_lines = @intCast(num_lines),
+            .allocator = allocator,
+        };
+    }
+
+    /// GPU-accelerated regex pattern matching
+    pub fn processAwkRegex(self: *Self, text: []const u8, pattern: []const u8, options: AwkOptions, allocator: std.mem.Allocator) !AwkResult {
+        if (text.len > MAX_GPU_BUFFER_SIZE) return error.TextTooLarge;
+
+        // Compile regex pattern for GPU
+        var gpu_regex = try regex_compiler.compileForGpu(pattern, .{
+            .case_insensitive = options.case_insensitive,
+        }, allocator);
+        defer gpu_regex.deinit();
+
+        // Find line boundaries on CPU
+        var line_offsets: std.ArrayListUnmanaged(u32) = .{};
+        defer line_offsets.deinit(allocator);
+        var line_lengths: std.ArrayListUnmanaged(u32) = .{};
+        defer line_lengths.deinit(allocator);
+
+        var line_start: usize = 0;
+        for (text, 0..) |c, i| {
+            if (c == '\n') {
+                try line_offsets.append(allocator, @intCast(line_start));
+                try line_lengths.append(allocator, @intCast(i - line_start));
+                line_start = i + 1;
+            }
+        }
+        if (line_start < text.len) {
+            try line_offsets.append(allocator, @intCast(line_start));
+            try line_lengths.append(allocator, @intCast(text.len - line_start));
+        }
+
+        const num_lines = line_offsets.items.len;
+        if (num_lines == 0) {
+            return AwkResult{
+                .matches = &[_]AwkMatchResult{},
+                .fields = &[_]FieldInfo{},
+                .total_matches = 0,
+                .total_lines = 0,
+                .allocator = allocator,
+            };
+        }
+
+        // Create text buffer
+        const text_size: vk.DeviceSize = @intCast(((text.len + 3) / 4) * 4);
+        const text_buffer = try self.createBuffer(text_size);
+        defer self.destroyBuffer(text_buffer);
+        @memcpy(@as([*]u8, @ptrCast(text_buffer.mapped))[0..text.len], text);
+
+        // Create states buffer (packed as 3 x u32 per state)
+        const states_words = gpu_regex.states.len * 3;
+        const states_size: vk.DeviceSize = @intCast(@max(states_words * @sizeOf(u32), 4));
+        const states_buffer = try self.createBuffer(states_size);
+        defer self.destroyBuffer(states_buffer);
+        if (states_words > 0) {
+            const states_ptr: [*]u32 = @ptrCast(@alignCast(states_buffer.mapped));
+            for (gpu_regex.states, 0..) |state, i| {
+                const base = i * 3;
+                // Word 0: [type:8][flags:8][out:16]
+                states_ptr[base] = @as(u32, state.type) |
+                    (@as(u32, state.flags) << 8) |
+                    (@as(u32, state.out) << 16);
+                // Word 1: [out2:16][literal:8][group_idx:8]
+                states_ptr[base + 1] = @as(u32, state.out2) |
+                    (@as(u32, state.literal_char) << 16) |
+                    (@as(u32, state.group_idx) << 24);
+                // Word 2: bitmap_offset
+                states_ptr[base + 2] = state.bitmap_offset;
+            }
+        }
+
+        // Create bitmaps buffer
+        const bitmaps_size: vk.DeviceSize = @intCast(@max(gpu_regex.bitmaps.len * @sizeOf(u32), 4));
+        const bitmaps_buffer = try self.createBuffer(bitmaps_size);
+        defer self.destroyBuffer(bitmaps_buffer);
+        if (gpu_regex.bitmaps.len > 0) {
+            @memcpy(@as([*]u32, @ptrCast(@alignCast(bitmaps_buffer.mapped)))[0..gpu_regex.bitmaps.len], gpu_regex.bitmaps);
+        }
+
+        // Create config buffer
+        const config_buffer = try self.createBuffer(@sizeOf(AwkRegexConfig));
+        defer self.destroyBuffer(config_buffer);
+        @as(*AwkRegexConfig, @ptrCast(@alignCast(config_buffer.mapped))).* = AwkRegexConfig{
+            .text_len = @intCast(text.len),
+            .num_states = gpu_regex.header.num_states,
+            .start_state = gpu_regex.header.start_state,
+            .header_flags = gpu_regex.header.flags,
+            .num_bitmaps = @intCast(gpu_regex.bitmaps.len / 8),
+            .max_results = MAX_RESULTS,
+            .flags = options.toFlags(),
+        };
+
+        // Create results buffer
+        const results_size: vk.DeviceSize = @intCast(@sizeOf(AwkMatchResult) * MAX_RESULTS);
+        const results_buffer = try self.createBuffer(results_size);
+        defer self.destroyBuffer(results_buffer);
+
+        // Create counters buffer
+        const counters_buffer = try self.createBuffer(8);
+        defer self.destroyBuffer(counters_buffer);
+        const counters_ptr: *[2]u32 = @ptrCast(@alignCast(counters_buffer.mapped));
+        counters_ptr[0] = 0;
+        counters_ptr[1] = 0;
+
+        // Create line offsets/lengths buffers
+        const line_offsets_size: vk.DeviceSize = @intCast(line_offsets.items.len * @sizeOf(u32));
+        const line_offsets_buffer = try self.createBuffer(line_offsets_size);
+        defer self.destroyBuffer(line_offsets_buffer);
+        @memcpy(@as([*]u32, @ptrCast(@alignCast(line_offsets_buffer.mapped)))[0..line_offsets.items.len], line_offsets.items);
+
+        const line_lengths_size: vk.DeviceSize = @intCast(line_lengths.items.len * @sizeOf(u32));
+        const line_lengths_buffer = try self.createBuffer(line_lengths_size);
+        defer self.destroyBuffer(line_lengths_buffer);
+        @memcpy(@as([*]u32, @ptrCast(@alignCast(line_lengths_buffer.mapped)))[0..line_lengths.items.len], line_lengths.items);
+
+        // Set up descriptor set
+        var descriptor_set: vk.DescriptorSet = undefined;
+        self.vkd.allocateDescriptorSets(self.device, &.{ .descriptor_pool = self.descriptor_pool, .descriptor_set_count = 1, .p_set_layouts = @ptrCast(&self.descriptor_set_layout) }, @ptrCast(&descriptor_set)) catch return error.DescriptorSetAllocationFailed;
+
+        const buffer_infos = [_]vk.DescriptorBufferInfo{
+            .{ .buffer = text_buffer.buffer, .offset = 0, .range = text_size },
+            .{ .buffer = states_buffer.buffer, .offset = 0, .range = states_size },
+            .{ .buffer = bitmaps_buffer.buffer, .offset = 0, .range = bitmaps_size },
+            .{ .buffer = config_buffer.buffer, .offset = 0, .range = @sizeOf(AwkRegexConfig) },
+            .{ .buffer = results_buffer.buffer, .offset = 0, .range = results_size },
+            .{ .buffer = counters_buffer.buffer, .offset = 0, .range = 8 },
+            .{ .buffer = line_offsets_buffer.buffer, .offset = 0, .range = line_offsets_size },
+            .{ .buffer = line_lengths_buffer.buffer, .offset = 0, .range = line_lengths_size },
+        };
+
+        var writes: [8]vk.WriteDescriptorSet = undefined;
+        for (0..8) |i| {
+            writes[i] = .{
+                .dst_set = descriptor_set,
+                .dst_binding = @intCast(i),
+                .dst_array_element = 0,
+                .descriptor_count = 1,
+                .descriptor_type = .storage_buffer,
+                .p_image_info = undefined,
+                .p_buffer_info = @ptrCast(&buffer_infos[i]),
+                .p_texel_buffer_view = undefined,
+            };
+        }
+        self.vkd.updateDescriptorSets(self.device, 8, &writes, 0, undefined);
+
+        // Execute using regex pipeline
+        var command_buffer: vk.CommandBuffer = undefined;
+        self.vkd.allocateCommandBuffers(self.device, &.{ .command_pool = self.command_pool, .level = .primary, .command_buffer_count = 1 }, @ptrCast(&command_buffer)) catch return error.CommandBufferAllocationFailed;
+        defer self.vkd.freeCommandBuffers(self.device, self.command_pool, 1, @ptrCast(&command_buffer));
+
+        self.vkd.beginCommandBuffer(command_buffer, &.{ .flags = .{ .one_time_submit_bit = true } }) catch return error.CommandBufferBeginFailed;
+        self.vkd.cmdBindPipeline(command_buffer, .compute, self.regex_compute_pipeline);
         self.vkd.cmdBindDescriptorSets(command_buffer, .compute, self.pipeline_layout, 0, 1, @ptrCast(&descriptor_set), 0, undefined);
 
         const workgroups = @max(1, (num_lines + 63) / 64);
