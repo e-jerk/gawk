@@ -29,16 +29,21 @@ COPY . .
 
 # Build the binary
 ARG BINARY_NAME=gawk
-RUN zig build -Doptimize=ReleaseFast \
-    && mv zig-out/bin/${BINARY_NAME} /${BINARY_NAME}
+ARG BUILD_VARIANT=pure
+RUN if [ "$BUILD_VARIANT" = "gnu" ]; then \
+        zig build -Doptimize=ReleaseFast -Dgnu=true; \
+    else \
+        zig build -Doptimize=ReleaseFast; \
+    fi && \
+    mv zig-out/bin/${BINARY_NAME} /${BINARY_NAME}
 
 # Stage 2: Export (for CI binary extraction)
 FROM scratch AS export
 ARG BINARY_NAME=gawk
 COPY --from=builder /${BINARY_NAME} /${BINARY_NAME}
 
-# Stage 3: Runtime
-FROM alpine:3
+# Stage 3: Runtime (pure variant)
+FROM alpine:3 AS runtime
 
 ARG TARGETARCH
 ARG BINARY_NAME=gawk

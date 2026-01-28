@@ -7,15 +7,18 @@
     .dependencies = .{
         // Shared regex library
         .e_jerk_regex = .{
-            .path = "../regex",
+            .url = "git+https://github.com/e-jerk/regex#bf3f7db91ab18d0782acf46fa39f170abb2670ad",
+            .hash = "e_jerk_regex-0.1.0-ex0qsUv2AADQ6ViebDG4UIHjxP9EAH7Ybws-O_VN62BB",
         },
         // Shared shader library
         .shaders_common = .{
-            .path = "../shaders-common",
+            .url = "git+https://github.com/e-jerk/shaders-common#c132f464e1236f1f519c68c8203509255f65e3e5",
+            .hash = "shaders_common-0.1.0-dZ7wZxN7AACEW9xtWDNvjRG6YGuu5Z5WeidoqWnmo0Uq",
         },
         // GPU detection and auto-selection library
         .e_jerk_gpu = .{
-            .path = "../gpu",
+            .url = "git+https://github.com/e-jerk/gpu#v0.1.0",
+            .hash = "e_jerk_gpu-0.1.0-FyPePJLqAAAgxAo6-HcdPgAsQdxgJCQfuoqoco1-By9U",
         },
         // Metal bindings for Zig
         .zig_metal = .{
