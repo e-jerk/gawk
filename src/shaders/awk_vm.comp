@@ -1,0 +1,598 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// GPU Bytecode Virtual Machine for AWK
+// Executes compiled AWK bytecode on GPU for full feature parity
+
+// Opcodes - must match bytecode.zig
+const uint OP_NOP = 0;
+const uint OP_PUSH_NUM = 1;
+const uint OP_PUSH_STR = 2;
+const uint OP_PUSH_FIELD = 3;
+const uint OP_PUSH_VAR = 4;
+const uint OP_PUSH_SPECIAL = 5;
+const uint OP_POP = 6;
+const uint OP_DUP = 7;
+
+const uint OP_ADD = 10;
+const uint OP_SUB = 11;
+const uint OP_MUL = 12;
+const uint OP_DIV = 13;
+const uint OP_MOD = 14;
+const uint OP_POW = 15;
+const uint OP_NEG = 16;
+
+const uint OP_LT = 20;
+const uint OP_LE = 21;
+const uint OP_GT = 22;
+const uint OP_GE = 23;
+const uint OP_EQ = 24;
+const uint OP_NE = 25;
+
+const uint OP_AND = 30;
+const uint OP_OR = 31;
+const uint OP_NOT = 32;
+
+const uint OP_CONCAT = 40;
+const uint OP_LENGTH = 41;
+const uint OP_SUBSTR = 42;
+const uint OP_INDEX_FN = 43;
+const uint OP_TOUPPER = 44;
+const uint OP_TOLOWER = 45;
+
+const uint OP_SIN = 50;
+const uint OP_COS = 51;
+const uint OP_SQRT = 52;
+const uint OP_INT_FN = 53;
+const uint OP_LOG_FN = 54;
+const uint OP_EXP_FN = 55;
+
+const uint OP_JMP = 60;
+const uint OP_JMP_IF = 61;
+const uint OP_JMP_IF_NOT = 62;
+const uint OP_CALL = 63;
+const uint OP_RET = 64;
+const uint OP_HALT = 65;
+
+const uint OP_STORE_VAR = 70;
+const uint OP_INCR_VAR = 73;
+const uint OP_DECR_VAR = 74;
+
+const uint OP_PRINT = 80;
+const uint OP_PRINTF = 81;
+const uint OP_EMIT_OFS = 82;
+const uint OP_EMIT_ORS = 83;
+
+const uint OP_NEXT_LINE = 95;
+const uint OP_EXIT_PROG = 96;
+const uint OP_PUSH_FIELD_DYN = 100;
+
+// Special variable types
+const uint SVAR_NR = 0;
+const uint SVAR_NF = 1;
+const uint SVAR_FNR = 2;
+
+// GPU Value type
+struct GpuValue {
+    float number;
+    uint str_offset;
+};
+
+// VM execution configuration
+struct VmConfig {
+    uint num_instructions;
+    uint num_constants;
+    uint num_variables;
+    uint stack_size;
+    uint max_output_per_thread;
+    uint main_offset;
+    uint flags;
+    uint _pad;
+};
+
+// Buffer bindings
+layout(std430, binding = 0) readonly buffer TextBuffer { uint text_data[]; };
+layout(std430, binding = 1) readonly buffer BytecodeBuffer { uint bytecode_data[]; };
+layout(std430, binding = 2) readonly buffer ConstantsBuffer { float num_constants[]; };
+layout(std430, binding = 3) readonly buffer StrPoolBuffer { uint str_pool[]; };
+layout(std430, binding = 4) readonly buffer FieldSepBuffer { uint field_sep_data[]; };
+layout(std430, binding = 5) readonly buffer ConfigBuffer { VmConfig config; };
+layout(std430, binding = 6) writeonly buffer OutputBuffer { uint output_data[]; };
+layout(std430, binding = 7) buffer OutputOffsetsBuffer { uint output_offsets[]; };
+layout(std430, binding = 8) readonly buffer LineOffsetsBuffer { uint line_offsets[]; };
+layout(std430, binding = 9) readonly buffer LineLengthsBuffer { uint line_lengths[]; };
+
+// Get byte from packed uint array
+uint get_text_byte(uint pos) {
+    uint word_idx = pos >> 2u;
+    uint byte_idx = pos & 3u;
+    return (text_data[word_idx] >> (byte_idx << 3u)) & 0xFFu;
+}
+
+// Get instruction from bytecode
+void get_instruction(uint pc, out uint opcode, out uint arg1, out uint arg2, out uint arg3) {
+    uint word_idx = pc >> 2u;
+    uint byte_offset = pc & 3u;
+    uint word = bytecode_data[word_idx];
+
+    if (byte_offset == 0u) {
+        opcode = word & 0xFFu;
+        arg1 = (word >> 8u) & 0xFFu;
+        arg2 = (word >> 16u) & 0xFFu;
+        arg3 = (word >> 24u) & 0xFFu;
+    } else {
+        // Handle unaligned access
+        uint word2 = bytecode_data[word_idx + 1u];
+        uint shift = byte_offset << 3u;
+        uint combined = (word >> shift) | (word2 << (32u - shift));
+        opcode = combined & 0xFFu;
+        arg1 = (combined >> 8u) & 0xFFu;
+        arg2 = (combined >> 16u) & 0xFFu;
+        arg3 = (combined >> 24u) & 0xFFu;
+    }
+}
+
+// Check if character is separator
+bool is_separator(uint c) {
+    return (c == 0x20u) || (c == 0x09u);  // space or tab
+}
+
+// Extract field from line
+void extract_field(uint line_start, uint line_len, uint field_num, out uint f_start, out uint f_len) {
+    if (field_num == 0u) {
+        f_start = line_start;
+        f_len = line_len;
+        return;
+    }
+
+    uint current_field = 1u;
+    uint field_start_pos = 0u;
+    bool in_field = false;
+
+    for (uint i = 0u; i < line_len; i++) {
+        uint c = get_text_byte(line_start + i);
+        bool is_sep = is_separator(c);
+
+        if (!is_sep && !in_field) {
+            in_field = true;
+            field_start_pos = i;
+        } else if (is_sep && in_field) {
+            if (current_field == field_num) {
+                f_start = line_start + field_start_pos;
+                f_len = i - field_start_pos;
+                return;
+            }
+            current_field++;
+            in_field = false;
+        }
+    }
+
+    if (in_field && current_field == field_num) {
+        f_start = line_start + field_start_pos;
+        f_len = line_len - field_start_pos;
+        return;
+    }
+
+    f_start = 0u;
+    f_len = 0u;
+}
+
+// Count fields in line
+uint count_fields(uint line_start, uint line_len) {
+    uint count = 0u;
+    bool in_field = false;
+
+    for (uint i = 0u; i < line_len; i++) {
+        uint c = get_text_byte(line_start + i);
+        bool is_sep = is_separator(c);
+
+        if (!is_sep && !in_field) {
+            in_field = true;
+            count++;
+        } else if (is_sep) {
+            in_field = false;
+        }
+    }
+
+    return count;
+}
+
+// Parse number from text
+float parse_number(uint start, uint len) {
+    float val = 0.0;
+    float sign = 1.0;
+    bool has_decimal = false;
+    float decimal_place = 0.1;
+
+    for (uint i = 0u; i < len && i < 20u; i++) {
+        uint c = get_text_byte(start + i);
+        if (c == 0x2Du && i == 0u) {  // '-'
+            sign = -1.0;
+        } else if (c >= 0x30u && c <= 0x39u) {  // '0'-'9'
+            if (has_decimal) {
+                val += float(c - 0x30u) * decimal_place;
+                decimal_place *= 0.1;
+            } else {
+                val = val * 10.0 + float(c - 0x30u);
+            }
+        } else if (c == 0x2Eu) {  // '.'
+            has_decimal = true;
+        } else if (c != 0x20u) {  // not space
+            break;
+        }
+    }
+
+    return val * sign;
+}
+
+// Check if value is truthy
+bool is_truthy(GpuValue v) {
+    if (v.str_offset != 0u) return true;
+    return v.number != 0.0;
+}
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+
+    uint line_start = line_offsets[gid];
+    uint line_len = line_lengths[gid];
+
+    // Thread state
+    GpuValue stack[32];
+    GpuValue variables[16];
+    uint sp = 0u;
+    uint pc = config.main_offset;
+    uint output_pos = gid * config.max_output_per_thread;
+    uint line_num = gid + 1u;
+    uint field_count = count_fields(line_start, line_len);
+    bool halted = false;
+    bool next_line = false;
+
+    // Initialize variables
+    for (uint i = 0u; i < 16u; i++) {
+        variables[i].number = 0.0;
+        variables[i].str_offset = 0u;
+    }
+
+    // Execute bytecode
+    uint max_iterations = 10000u;
+    uint iterations = 0u;
+
+    while (!halted && !next_line && iterations < max_iterations) {
+        iterations++;
+
+        uint opcode, arg1, arg2, arg3;
+        get_instruction(pc * 4u, opcode, arg1, arg2, arg3);
+        pc++;
+
+        switch (opcode) {
+            case OP_NOP:
+                break;
+
+            case OP_PUSH_NUM: {
+                uint const_idx = arg1 | (arg2 << 8u);
+                stack[sp].number = num_constants[const_idx];
+                stack[sp].str_offset = 0u;
+                sp++;
+                break;
+            }
+
+            case OP_PUSH_FIELD: {
+                uint field_num = arg1;
+                uint f_start, f_len;
+                extract_field(line_start, line_len, field_num, f_start, f_len);
+                stack[sp].number = parse_number(f_start, f_len);
+                stack[sp].str_offset = f_start | (f_len << 16u);
+                sp++;
+                break;
+            }
+
+            case OP_PUSH_VAR: {
+                uint var_idx = arg1;
+                stack[sp] = variables[var_idx];
+                sp++;
+                break;
+            }
+
+            case OP_PUSH_SPECIAL: {
+                float val = 0.0;
+                if (arg1 == SVAR_NR) val = float(line_num);
+                else if (arg1 == SVAR_NF) val = float(field_count);
+                else if (arg1 == SVAR_FNR) val = float(line_num);
+                stack[sp].number = val;
+                stack[sp].str_offset = 0u;
+                sp++;
+                break;
+            }
+
+            case OP_POP:
+                if (sp > 0u) sp--;
+                break;
+
+            case OP_DUP:
+                if (sp > 0u) {
+                    stack[sp] = stack[sp - 1u];
+                    sp++;
+                }
+                break;
+
+            case OP_ADD:
+                if (sp >= 2u) {
+                    sp--;
+                    stack[sp - 1u].number += stack[sp].number;
+                }
+                break;
+
+            case OP_SUB:
+                if (sp >= 2u) {
+                    sp--;
+                    stack[sp - 1u].number -= stack[sp].number;
+                }
+                break;
+
+            case OP_MUL:
+                if (sp >= 2u) {
+                    sp--;
+                    stack[sp - 1u].number *= stack[sp].number;
+                }
+                break;
+
+            case OP_DIV:
+                if (sp >= 2u) {
+                    sp--;
+                    if (stack[sp].number != 0.0) {
+                        stack[sp - 1u].number /= stack[sp].number;
+                    }
+                }
+                break;
+
+            case OP_MOD:
+                if (sp >= 2u) {
+                    sp--;
+                    if (stack[sp].number != 0.0) {
+                        stack[sp - 1u].number = mod(stack[sp - 1u].number, stack[sp].number);
+                    }
+                }
+                break;
+
+            case OP_POW:
+                if (sp >= 2u) {
+                    sp--;
+                    stack[sp - 1u].number = pow(stack[sp - 1u].number, stack[sp].number);
+                }
+                break;
+
+            case OP_NEG:
+                if (sp > 0u) {
+                    stack[sp - 1u].number = -stack[sp - 1u].number;
+                }
+                break;
+
+            case OP_LT:
+            case OP_LE:
+            case OP_GT:
+            case OP_GE:
+            case OP_EQ:
+            case OP_NE:
+                if (sp >= 2u) {
+                    sp--;
+                    float a = stack[sp - 1u].number;
+                    float b = stack[sp].number;
+                    bool result = false;
+                    if (opcode == OP_LT) result = a < b;
+                    else if (opcode == OP_LE) result = a <= b;
+                    else if (opcode == OP_GT) result = a > b;
+                    else if (opcode == OP_GE) result = a >= b;
+                    else if (opcode == OP_EQ) result = a == b;
+                    else if (opcode == OP_NE) result = a != b;
+                    stack[sp - 1u].number = result ? 1.0 : 0.0;
+                    stack[sp - 1u].str_offset = 0u;
+                }
+                break;
+
+            case OP_AND:
+                if (sp >= 2u) {
+                    sp--;
+                    bool result = is_truthy(stack[sp - 1u]) && is_truthy(stack[sp]);
+                    stack[sp - 1u].number = result ? 1.0 : 0.0;
+                    stack[sp - 1u].str_offset = 0u;
+                }
+                break;
+
+            case OP_OR:
+                if (sp >= 2u) {
+                    sp--;
+                    bool result = is_truthy(stack[sp - 1u]) || is_truthy(stack[sp]);
+                    stack[sp - 1u].number = result ? 1.0 : 0.0;
+                    stack[sp - 1u].str_offset = 0u;
+                }
+                break;
+
+            case OP_NOT:
+                if (sp > 0u) {
+                    stack[sp - 1u].number = is_truthy(stack[sp - 1u]) ? 0.0 : 1.0;
+                    stack[sp - 1u].str_offset = 0u;
+                }
+                break;
+
+            case OP_LENGTH:
+                if (sp > 0u) {
+                    uint str_info = stack[sp - 1u].str_offset;
+                    uint len = (str_info >> 16u) & 0xFFFFu;
+                    stack[sp - 1u].number = float(len);
+                    stack[sp - 1u].str_offset = 0u;
+                }
+                break;
+
+            case OP_SIN:
+                if (sp > 0u) {
+                    stack[sp - 1u].number = sin(stack[sp - 1u].number);
+                }
+                break;
+
+            case OP_COS:
+                if (sp > 0u) {
+                    stack[sp - 1u].number = cos(stack[sp - 1u].number);
+                }
+                break;
+
+            case OP_SQRT:
+                if (sp > 0u) {
+                    stack[sp - 1u].number = sqrt(stack[sp - 1u].number);
+                }
+                break;
+
+            case OP_INT_FN:
+                if (sp > 0u) {
+                    stack[sp - 1u].number = trunc(stack[sp - 1u].number);
+                }
+                break;
+
+            case OP_LOG_FN:
+                if (sp > 0u) {
+                    stack[sp - 1u].number = log(stack[sp - 1u].number);
+                }
+                break;
+
+            case OP_EXP_FN:
+                if (sp > 0u) {
+                    stack[sp - 1u].number = exp(stack[sp - 1u].number);
+                }
+                break;
+
+            case OP_JMP: {
+                uint offset = arg1 | (arg2 << 8u);
+                pc = offset;
+                break;
+            }
+
+            case OP_JMP_IF:
+                if (sp > 0u) {
+                    sp--;
+                    if (is_truthy(stack[sp])) {
+                        uint offset = arg1 | (arg2 << 8u);
+                        pc = offset;
+                    }
+                }
+                break;
+
+            case OP_JMP_IF_NOT:
+                if (sp > 0u) {
+                    sp--;
+                    if (!is_truthy(stack[sp])) {
+                        uint offset = arg1 | (arg2 << 8u);
+                        pc = offset;
+                    }
+                }
+                break;
+
+            case OP_STORE_VAR: {
+                uint var_idx = arg1;
+                if (sp > 0u && var_idx < 16u) {
+                    variables[var_idx] = stack[sp - 1u];
+                }
+                break;
+            }
+
+            case OP_PRINT: {
+                uint num_args = arg1;
+                uint out_pos = output_pos;
+                uint max_out = gid * config.max_output_per_thread + config.max_output_per_thread;
+
+                // Pop all values first (they come off in reverse order)
+                GpuValue print_vals[16];
+                uint actual_args = min(num_args, 16u);
+                for (uint i = 0u; i < actual_args && sp > 0u; i++) {
+                    sp--;
+                    print_vals[i] = stack[sp];
+                }
+
+                // Output in reverse order (original push order)
+                for (uint i = actual_args; i > 0u && out_pos < max_out; i--) {
+                    GpuValue val = print_vals[i - 1u];
+
+                    if (val.str_offset != 0u) {
+                        // Output string field
+                        uint f_start = val.str_offset & 0xFFFFu;
+                        uint f_len = (val.str_offset >> 16u) & 0xFFFFu;
+                        for (uint j = 0u; j < f_len && out_pos < max_out; j++) {
+                            uint c = get_text_byte(f_start + j);
+                            uint word_idx = out_pos >> 2u;
+                            uint byte_idx = out_pos & 3u;
+                            uint mask = 0xFFu << (byte_idx << 3u);
+                            uint val_shifted = c << (byte_idx << 3u);
+                            output_data[word_idx] = (output_data[word_idx] & ~mask) | val_shifted;
+                            out_pos++;
+                        }
+                    } else {
+                        // Output number as integer
+                        int n = int(val.number);
+                        if (n < 0) {
+                            uint word_idx = out_pos >> 2u;
+                            uint byte_idx = out_pos & 3u;
+                            output_data[word_idx] = (output_data[word_idx] & ~(0xFFu << (byte_idx << 3u))) | (0x2Du << (byte_idx << 3u));
+                            out_pos++;
+                            n = -n;
+                        }
+                        if (n == 0) {
+                            uint word_idx = out_pos >> 2u;
+                            uint byte_idx = out_pos & 3u;
+                            output_data[word_idx] = (output_data[word_idx] & ~(0xFFu << (byte_idx << 3u))) | (0x30u << (byte_idx << 3u));
+                            out_pos++;
+                        } else {
+                            uint digits[20];
+                            uint num_digits = 0u;
+                            while (n > 0 && num_digits < 20u) {
+                                digits[num_digits++] = 0x30u + uint(n % 10);
+                                n /= 10;
+                            }
+                            for (uint j = num_digits; j > 0u && out_pos < max_out; j--) {
+                                uint word_idx = out_pos >> 2u;
+                                uint byte_idx = out_pos & 3u;
+                                output_data[word_idx] = (output_data[word_idx] & ~(0xFFu << (byte_idx << 3u))) | (digits[j - 1u] << (byte_idx << 3u));
+                                out_pos++;
+                            }
+                        }
+                    }
+
+                    // Add OFS between values (except last)
+                    if (i > 1u && out_pos < max_out) {
+                        uint word_idx = out_pos >> 2u;
+                        uint byte_idx = out_pos & 3u;
+                        output_data[word_idx] = (output_data[word_idx] & ~(0xFFu << (byte_idx << 3u))) | (0x20u << (byte_idx << 3u));
+                        out_pos++;
+                    }
+                }
+
+                // Add newline
+                if (out_pos < max_out) {
+                    uint word_idx = out_pos >> 2u;
+                    uint byte_idx = out_pos & 3u;
+                    output_data[word_idx] = (output_data[word_idx] & ~(0xFFu << (byte_idx << 3u))) | (0x0Au << (byte_idx << 3u));
+                    out_pos++;
+                }
+
+                output_pos = out_pos;
+                break;
+            }
+
+            case OP_NEXT_LINE:
+                next_line = true;
+                break;
+
+            case OP_EXIT_PROG:
+            case OP_HALT:
+                halted = true;
+                break;
+
+            default:
+                break;
+        }
+    }
+
+    // Record output length
+    uint output_len = output_pos - (gid * config.max_output_per_thread);
+    output_offsets[gid] = output_len;
+}

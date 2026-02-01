@@ -216,3 +216,41 @@ pub fn formatBytes(bytes: usize) struct { value: f64, unit: []const u8 } {
     if (bytes >= 1024) return .{ .value = @as(f64, @floatFromInt(bytes)) / 1024, .unit = "KB" };
     return .{ .value = @as(f64, @floatFromInt(bytes)), .unit = "B" };
 }
+
+// ============================================================================
+// GPU Bytecode VM Types (matches shader structs)
+// ============================================================================
+
+/// Bytecode instruction (4 bytes, GPU-aligned)
+pub const Instruction = extern struct {
+    opcode: u8,
+    arg1: u8,
+    arg2: u8,
+    arg3: u8,
+};
+
+/// VM execution configuration
+pub const VmConfig = extern struct {
+    num_instructions: u32,
+    num_constants: u32,
+    num_variables: u32,
+    stack_size: u32,
+    max_output_per_thread: u32,
+    main_offset: u32,
+    flags: u32,
+    _pad: u32 = 0,
+};
+
+/// GPU-ready compiled bytecode
+pub const GpuBytecode = struct {
+    instructions: []const Instruction,
+    num_constants: []const f32,
+    main_offset: u32,
+    num_variables: u32,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *GpuBytecode) void {
+        self.allocator.free(self.instructions);
+        self.allocator.free(self.num_constants);
+    }
+};

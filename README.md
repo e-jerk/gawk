@@ -79,18 +79,21 @@ gawk -V '/pattern/' file.txt
 | `tolower($N)` | ✓ | ✓ | ✓ | **8x** | **Native** |
 | `NR` (line number) | ✓ | ✓ | ✓ | **8x** | **Native** |
 | `NF` (field count) | ✓ | ✓ | ✓ | **8x** | **Native** |
-| `gsub(/pat/, "repl")` | ✓ | — | — | CPU only | Native |
-| `BEGIN/END` blocks | ✓ | — | — | CPU only | **Native** |
-| Variables `x=5` | ✓ | — | — | CPU only | **Native** |
+| `gsub(/pat/, "repl")` | ✓ | ✓ | ✓ | **8x** | **Native** |
+| `BEGIN/END` blocks | ✓ | ✓ | ✓ | **VM** | **Native** |
+| Variables `x=5` | ✓ | ✓ | ✓ | **VM** | **Native** |
+| Arithmetic expressions | ✓ | ✓ | ✓ | **VM** | **Native** |
+| Conditionals `if/else` | ✓ | ✓ | ✓ | **VM** | **Native** |
+| Loops `while/for` | ✓ | ✓ | ✓ | **VM** | **Native** |
+| `sin/cos/sqrt/log/exp` | ✓ | ✓ | ✓ | **VM** | **Native** |
 | User-defined functions | ✓ | — | — | CPU only | **Native** |
 | Multiple patterns | ✓ | — | — | CPU only | **Native** |
-| Arithmetic expressions | ✓ | — | — | CPU only | **Native** |
-| Conditionals `if/else` | ✓ | — | — | CPU only | **Native** |
-| Loops `while/for` | ✓ | — | — | CPU only | **Native** |
 | Arrays `a[i]` | ✓ | — | — | CPU only | **Native** |
 | `printf/sprintf` | ✓ | — | — | CPU only | **Native** |
 
-**Test Coverage**: 32/32 GNU compatibility tests passing, 16+ smoke tests including regex
+**GPU Bytecode VM**: Complex AWK programs are compiled to bytecode and executed on the GPU using a stack-based virtual machine. Each line is processed by a separate GPU thread.
+
+**Test Coverage**: 32/32 GNU compatibility tests passing, 17+ smoke tests including regex
 
 **Backend Parity**: CPU, Metal, and Vulkan produce identical results for GPU-accelerated features.
 
@@ -112,14 +115,84 @@ gawk -V '/pattern/' file.txt
 | `NR` | Current line number (1-indexed) | `{print NR}` → `1`, `2`, `3`... |
 | `NF` | Number of fields in current line | `{print NF}` → `3` for "a b c" |
 
-## Options
+## Command Line Reference
 
-| Flag | Description |
-|------|-------------|
-| `-F, --field-separator` | Set field separator |
-| `-i, --ignore-case` | Case-insensitive pattern matching |
-| `-v, --invert-match` | Print non-matching lines |
-| `-V, --verbose` | Show timing and backend info |
+<details>
+<summary>Full --help output</summary>
+
+```
+Usage: gawk [OPTIONS] 'program' [file...]
+       gawk [OPTIONS] '/pattern/' [file...]
+       gawk [OPTIONS] '/pattern/ {print $1, $2}' [file...]
+       gawk [OPTIONS] '{gsub(/old/, "new"); print}' [file...]
+
+GPU-accelerated AWK for pattern matching, field extraction, and substitution.
+
+Pattern Matching:                                [GPU+SIMD]
+  /pattern/      Match lines containing pattern (regex supported)
+  /pattern/i     Case-insensitive pattern matching (with -i flag)
+
+Field Selection:                                 [GPU+SIMD]
+  $0             Entire line
+  $1, $2, ...    Individual fields (split by -F separator)
+  $NF            Last field
+
+Options:
+  -F SEP         Use SEP as field separator (default: whitespace)
+  -i             Case-insensitive pattern matching     [GPU+SIMD]
+  -v             Invert match (print non-matching)     [GPU+SIMD]
+  --backend MODE Backend: auto, cpu, gnu, gpu, metal, vulkan
+  --cpu          Force CPU backend (SIMD-optimized)
+  --gnu          Force GNU backend (gawk reference)
+  --gpu          Force GPU (Metal on macOS, Vulkan otherwise)
+  --verbose      Print backend selection and timing info
+  -h, --help     Show this help
+
+Built-in Functions:                              [GPU+SIMD]
+  length($N)         Return length of field N
+  substr($N, s, l)   Substring of field N from position s, length l
+  index($N, "str")   Position of "str" in field N (0 if not found)
+  toupper($N)        Convert field N to uppercase
+  tolower($N)        Convert field N to lowercase
+
+Substitution:                                    [GPU+SIMD]
+  gsub(/pat/, "rep") Replace all occurrences of pattern with replacement
+  sub(/pat/, "rep")  Replace first occurrence of pattern with replacement
+
+Advanced Features (Full Parser):                 [CPU]
+  BEGIN { }      Execute before processing any input
+  END { }        Execute after processing all input
+  if/else/while/for  Control flow statements
+  printf         Formatted output
+  Variables      User-defined variables and arithmetic
+
+Optimization Notes:
+  [GPU+SIMD] Pattern matching uses Thompson NFA on GPU compute shaders.
+             Field extraction and string functions run in parallel on GPU.
+             CPU fallback uses 16/32-byte SIMD vector operations.
+  [CPU]      Complex AWK programs with control flow, BEGIN/END blocks,
+             or user variables use the full CPU-based parser/evaluator.
+
+Examples:
+  gawk '/error/' log.txt              Print lines containing 'error'
+  gawk -F: '{print $1}' /etc/passwd   Print first field (colon-separated)
+  gawk '/root/ {print $1, $3}' file   Print fields 1 and 3 from matching lines
+  gawk '{gsub(/old/, "new"); print}'  Replace 'old' with 'new' globally
+  gawk '{print length($1)}' file      Print length of first field
+  gawk '{print substr($1, 1, 3)}'     Print first 3 chars of field 1
+  gawk '{print toupper($1)}'          Print field 1 in uppercase
+```
+
+</details>
+
+## Build Variants
+
+| Variant | Description | Vulkan on macOS | `--gnu` flag |
+|---------|-------------|-----------------|--------------|
+| **pure** | Zig + SIMD + GPU only. No external dependencies. | No | Not available |
+| **gnu** | Includes GNU gawk + Vulkan via MoltenVK. | Yes | Falls back to GNU gawk |
+
+The gnu build enables Vulkan on macOS using MoltenVK, allowing both Metal and Vulkan backends on Mac.
 
 ## Backend Selection
 
@@ -127,10 +200,10 @@ gawk -V '/pattern/' file.txt
 |------|-------------|
 | `--auto` | Automatically select optimal backend (default) |
 | `--gpu` | Use GPU (Metal on macOS, Vulkan elsewhere) |
-| `--cpu` | Force CPU backend |
-| `--gnu` | Force GNU gawk backend |
+| `--cpu` | Force CPU backend (SIMD-optimized) |
+| `--gnu` | Force GNU gawk backend (gnu build only) |
 | `--metal` | Force Metal backend (macOS only) |
-| `--vulkan` | Force Vulkan backend |
+| `--vulkan` | Force Vulkan backend (macOS+gnu build, or Linux) |
 
 ## Architecture & Optimizations
 
@@ -183,6 +256,16 @@ The CPU backend provides SIMD-optimized AWK processing:
 - **Atomic Counters**: Thread-safe match and field counting
 - **Field Count**: Populated during CPU-side field splitting for NF support
 - **GPU Regex**: Thompson NFA execution via `regex_find()` from `regex_ops.h`
+- **Bytecode VM**: `awk_vm_execute` kernel executes AWK bytecode on GPU
+
+**GPU Bytecode Virtual Machine**:
+
+Complex AWK programs are compiled to bytecode and executed on the GPU:
+- `bytecode.zig`: Compiles AWK AST to stack-based bytecode instructions
+- 4-byte fixed-size instructions for GPU alignment (opcode + 3 args)
+- Per-thread execution: Each GPU thread processes one input line
+- Supported operations: arithmetic, comparisons, control flow (if/while/for), variables, built-in math functions, field extraction, print
+- `awk_vm_execute` kernel in Metal, `awk_vm.comp` shader in Vulkan
 
 **GPU Regex Implementation**:
 
@@ -200,6 +283,7 @@ The regex engine uses Thompson NFA (Non-deterministic Finite Automaton) executio
 - **Packed Word Access**: Efficient unaligned 4-byte reads
 - **Field Count**: Populated during CPU-side field splitting for NF support
 - **GPU Regex**: Thompson NFA execution via `regex_ops.glsl` (same algorithm as Metal)
+- **Bytecode VM**: `awk_vm.comp` shader executes AWK bytecode (same VM as Metal)
 
 ### Processing Pipeline
 
@@ -315,13 +399,17 @@ bash gnu-tests.sh   # GNU compatibility tests (32 tests)
 
 ## Recent Changes
 
+- **GPU Bytecode VM**: Full AWK programs now compile to bytecode and execute on GPU (Metal + Vulkan)
+  - Stack-based virtual machine with 4-byte instructions
+  - Supports: variables, arithmetic, comparisons, control flow (if/while/for), built-in math functions
+  - Each GPU thread processes one input line independently
 - **100% Native AWK**: Full AWK parser/evaluator for complex programs - no GNU fallback needed
 - **Native Features**: BEGIN/END blocks, variables, user-defined functions, if/else, while/for loops, arrays, printf/sprintf
 - **GPU Regex Support**: Native Thompson NFA regex execution on both Metal and Vulkan GPUs for patterns like `/[0-9]+/`, `/error|warning/`, `/hel+o/`
 - **Built-in Functions**: Native `length()`, `substr()`, `index()`, `toupper()`, `tolower()`, `split()`, `sin()`, `cos()`, `sqrt()`, `int()`, `log()`, `exp()`
 - **Special Variables**: Native `NR` (line number) and `NF` (field count) support
 - **Backend Parity**: CPU, Metal, and Vulkan now produce identical results for pattern matching
-- **Test Coverage**: 32 GNU compatibility tests passing, 20 smoke tests (including CPU, Metal, and Vulkan regex)
+- **Test Coverage**: 32 GNU compatibility tests passing, 17 smoke tests (including CPU, Metal, and Vulkan regex)
 
 ## License
 

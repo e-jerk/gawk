@@ -6,6 +6,7 @@ const cpu_gnu = @import("cpu_gnu");
 const regex = @import("regex");
 const parser = @import("parser.zig");
 const evaluator = @import("evaluator.zig");
+const bytecode = @import("bytecode.zig");
 const Value = @import("value.zig").Value;
 const ast = @import("ast.zig");
 
@@ -60,6 +61,10 @@ pub fn main() !u8 {
             backend_mode = .cpu_gnu;
         } else if (std.mem.eql(u8, arg, "--gpu")) {
             backend_mode = .gpu;
+        } else if (std.mem.eql(u8, arg, "--metal")) {
+            backend_mode = .metal;
+        } else if (std.mem.eql(u8, arg, "--vulkan")) {
+            backend_mode = .vulkan;
         } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             printHelp();
             return 0;
@@ -132,14 +137,23 @@ pub fn main() !u8 {
 
     // Check if program needs full parser/evaluator for complex AWK features
     if (needsFullParser(program_text)) {
-        if (verbose) std.debug.print("Using full AWK parser/evaluator\n", .{});
-        const output = executeFullAwk(program_text, text, options.field_separator, allocator) catch |err| {
-            std.debug.print("gawk: error executing program: {}\n", .{err});
-            return 1;
-        };
-        defer allocator.free(output);
-        _ = std.posix.write(std.posix.STDOUT_FILENO, output) catch {};
-        return 0;
+        // Try GPU bytecode VM first for full feature parity
+        const gpu_output = executeFullAwkGpu(program_text, text, options, backend_mode, verbose, allocator);
+        if (gpu_output) |output| {
+            defer allocator.free(output);
+            _ = std.posix.write(std.posix.STDOUT_FILENO, output) catch {};
+            return 0;
+        } else |_| {
+            // Fall back to CPU evaluator
+            if (verbose) std.debug.print("GPU bytecode VM unavailable, using CPU evaluator\n", .{});
+            const output = executeFullAwk(program_text, text, options.field_separator, allocator) catch |err| {
+                std.debug.print("gawk: error executing program: {}\n", .{err});
+                return 1;
+            };
+            defer allocator.free(output);
+            _ = std.posix.write(std.posix.STDOUT_FILENO, output) catch {};
+            return 0;
+        }
     }
 
     // Handle substitution mode (gsub)
@@ -620,23 +634,58 @@ fn printHelp() void {
         \\
         \\GPU-accelerated AWK for pattern matching, field extraction, and substitution.
         \\
+        \\Pattern Matching:                                [GPU+SIMD]
+        \\  /pattern/      Match lines containing pattern (regex supported)
+        \\  /pattern/i     Case-insensitive pattern matching (with -i flag)
+        \\
+        \\Field Selection:                                 [GPU+SIMD]
+        \\  $0             Entire line
+        \\  $1, $2, ...    Individual fields (split by -F separator)
+        \\  $NF            Last field
+        \\
         \\Options:
         \\  -F SEP         Use SEP as field separator (default: whitespace)
-        \\  -i             Case-insensitive pattern matching
-        \\  -v             Invert match (print non-matching lines)
-        \\  --backend MODE Backend: auto, cpu, gnu, gpu, metal, vulkan (default: auto)
-        \\  --cpu          Force CPU backend
-        \\  --gnu          Force GNU backend (reference implementation)
-        \\  --gpu          Force GPU backend (Metal on macOS, Vulkan otherwise)
+        \\  -i             Case-insensitive pattern matching     [GPU+SIMD]
+        \\  -v             Invert match (print non-matching)     [GPU+SIMD]
+        \\  --backend MODE Backend: auto, cpu, gnu, gpu, metal, vulkan
+        \\  --cpu          Force CPU backend (SIMD-optimized)
+        \\  --gnu          Force GNU backend (gawk reference)
+        \\  --gpu          Force GPU (Metal on macOS, Vulkan otherwise)
+        \\  --metal        Force Metal backend (macOS)
+        \\  --vulkan       Force Vulkan backend (macOS+gnu or Linux)
         \\  --verbose      Print backend selection and timing info
         \\  -h, --help     Show this help
         \\
-        \\Built-in Functions:
+        \\Built-in Functions:                              [GPU+SIMD]
         \\  length($N)         Return length of field N
-        \\  substr($N, s, l)   Return substring of field N starting at s with length l
-        \\  index($N, "str")   Return position of "str" in field N (0 if not found)
+        \\  substr($N, s, l)   Substring of field N from position s, length l
+        \\  index($N, "str")   Position of "str" in field N (0 if not found)
         \\  toupper($N)        Convert field N to uppercase
         \\  tolower($N)        Convert field N to lowercase
+        \\
+        \\Substitution:                                    [GPU+SIMD]
+        \\  gsub(/pat/, "rep") Replace all occurrences of pattern with replacement
+        \\  sub(/pat/, "rep")  Replace first occurrence of pattern with replacement
+        \\
+        \\Advanced Features (GPU Bytecode VM):            [GPU]
+        \\  BEGIN { }      Execute before processing any input
+        \\  END { }        Execute after processing all input
+        \\  if/else/while/for  Control flow statements
+        \\  Variables      User-defined variables and arithmetic
+        \\  Math functions sin(), cos(), sqrt(), log(), exp(), int()
+        \\
+        \\Advanced Features (CPU only):
+        \\  printf         Formatted output
+        \\  Arrays         Associative arrays a[key]
+        \\  User functions User-defined functions
+        \\
+        \\Optimization Notes:
+        \\  [GPU+SIMD] Pattern matching uses Thompson NFA on GPU compute shaders.
+        \\             Field extraction and string functions run in parallel on GPU.
+        \\             CPU fallback uses 16/32-byte SIMD vector operations.
+        \\  [GPU VM]   Complex AWK programs compile to bytecode and execute on GPU.
+        \\             Each input line is processed by a separate GPU thread.
+        \\  [CPU]      Programs with arrays, printf, or user functions use CPU evaluator.
         \\
         \\Examples:
         \\  gawk '/error/' log.txt              Print lines containing 'error'
@@ -772,4 +821,90 @@ fn executeFullAwk(program_text: []const u8, input: []const u8, field_separator: 
     }
 
     return eval.execute(&program, input);
+}
+
+/// Execute full AWK program on GPU using bytecode VM
+fn executeFullAwkGpu(
+    program_text: []const u8,
+    input: []const u8,
+    options: AwkOptions,
+    backend_mode: BackendMode,
+    verbose: bool,
+    allocator: std.mem.Allocator,
+) ![]u8 {
+    // Parse the AWK program
+    var p = parser.Parser.init(program_text, allocator);
+    var program = p.parse() catch {
+        return error.ParseError;
+    };
+    defer program.deinit();
+
+    // Compile to bytecode
+    var compiler = bytecode.Compiler.init(allocator);
+    defer compiler.deinit();
+    var bc = compiler.compile(&program) catch {
+        return error.CompileError;
+    };
+    defer bc.deinit();
+
+    if (verbose) {
+        std.debug.print("Compiled AWK program to {} bytecode instructions\n", .{bc.instructions.len});
+    }
+
+    // Convert to GPU-compatible format (same layout, just need to reinterpret)
+    const gpu_instructions = try allocator.alloc(gpu.Instruction, bc.instructions.len);
+    defer allocator.free(gpu_instructions);
+    for (bc.instructions, 0..) |inst, i| {
+        // bytecode.Instruction has same layout as gpu.Instruction
+        gpu_instructions[i] = .{
+            .opcode = inst.opcode,
+            .arg1 = inst.arg1,
+            .arg2 = inst.arg2,
+            .arg3 = inst.arg3,
+        };
+    }
+
+    const gpu_constants = try allocator.alloc(f32, bc.num_constants.len);
+    defer allocator.free(gpu_constants);
+    for (bc.num_constants, 0..) |c, i| {
+        gpu_constants[i] = @floatCast(c);
+    }
+
+    const gpu_bc = gpu.GpuBytecode{
+        .instructions = gpu_instructions,
+        .num_constants = gpu_constants,
+        .main_offset = bc.main_offset,
+        .num_variables = bc.num_variables,
+        .allocator = allocator,
+    };
+
+    // Select backend and execute
+    const backend = selectBackend(backend_mode, input.len, verbose);
+
+    switch (backend) {
+        .metal => {
+            if (build_options.is_macos) {
+                const searcher = gpu.metal.MetalAwk.init(allocator) catch {
+                    return error.GpuInitFailed;
+                };
+                defer searcher.deinit();
+
+                if (!searcher.hasVmSupport()) {
+                    return error.VmNotSupported;
+                }
+
+                if (verbose) std.debug.print("Executing AWK program on Metal GPU bytecode VM\n", .{});
+                return searcher.executeBytecode(gpu_bc, input, options, allocator);
+            } else {
+                return error.MetalNotAvailable;
+            }
+        },
+        .vulkan => {
+            // TODO: Implement Vulkan bytecode VM execution
+            return error.VmNotSupported;
+        },
+        .cpu, .cuda, .opencl => {
+            return error.CpuBackendSelected;
+        },
+    }
 }

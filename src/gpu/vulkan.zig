@@ -23,7 +23,16 @@ const VulkanLoader = struct {
 
     fn load() !VulkanLoader {
         const lib_names = switch (builtin.os.tag) {
-            .macos => &[_][]const u8{ "libMoltenVK.dylib", "libvulkan.1.dylib", "libvulkan.dylib" },
+            .macos => &[_][]const u8{
+                "libMoltenVK.dylib",
+                "libvulkan.1.dylib",
+                "libvulkan.dylib",
+                // Homebrew paths (Apple Silicon and Intel)
+                "/opt/homebrew/lib/libMoltenVK.dylib",
+                "/opt/homebrew/lib/libvulkan.1.dylib",
+                "/usr/local/lib/libMoltenVK.dylib",
+                "/usr/local/lib/libvulkan.1.dylib",
+            },
             .linux => &[_][]const u8{ "libvulkan.so.1", "libvulkan.so" },
             .windows => &[_][]const u8{"vulkan-1.dll"},
             else => return error.UnsupportedPlatform,

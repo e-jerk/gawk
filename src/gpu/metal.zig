@@ -25,6 +25,7 @@ pub const MetalAwk = struct {
     pattern_match_pipeline: mtl.MTLComputePipelineState,
     field_split_pipeline: mtl.MTLComputePipelineState,
     regex_match_pipeline: mtl.MTLComputePipelineState,
+    vm_pipeline: ?mtl.MTLComputePipelineState,
     allocator: std.mem.Allocator,
     threads_per_group: usize,
     capabilities: mod.GpuCapabilities,
@@ -63,6 +64,14 @@ pub const MetalAwk = struct {
 
         const regex_match_pipeline = device.newComputePipelineStateWithFunctionError(regex_func, null) orelse return error.PipelineCreationFailed;
 
+        // Try to create VM pipeline (optional, may fail on older systems)
+        var vm_pipeline: ?mtl.MTLComputePipelineState = null;
+        const vm_func_name = mtl.NSString.stringWithUTF8String("awk_vm_execute");
+        if (library.newFunctionWithName(vm_func_name)) |vm_func| {
+            defer vm_func.release();
+            vm_pipeline = device.newComputePipelineStateWithFunctionError(vm_func, null);
+        }
+
         // Query hardware attributes
         const max_threads = pattern_match_pipeline.maxTotalThreadsPerThreadgroup();
         const threads_to_use: usize = @min(256, max_threads);
@@ -89,6 +98,7 @@ pub const MetalAwk = struct {
             .pattern_match_pipeline = pattern_match_pipeline,
             .field_split_pipeline = field_split_pipeline,
             .regex_match_pipeline = regex_match_pipeline,
+            .vm_pipeline = vm_pipeline,
             .allocator = allocator,
             .threads_per_group = threads_to_use,
             .capabilities = capabilities,
@@ -97,12 +107,18 @@ pub const MetalAwk = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        if (self.vm_pipeline) |p| p.release();
         self.regex_match_pipeline.release();
         self.field_split_pipeline.release();
         self.pattern_match_pipeline.release();
         self.command_queue.release();
         self.device.release();
         self.allocator.destroy(self);
+    }
+
+    /// Check if bytecode VM is available
+    pub fn hasVmSupport(self: *Self) bool {
+        return self.vm_pipeline != null;
     }
 
     pub fn processAwk(self: *Self, text: []const u8, pattern: []const u8, options: AwkOptions, allocator: std.mem.Allocator) !AwkResult {
@@ -488,5 +504,161 @@ pub const MetalAwk = struct {
             .total_lines = @intCast(num_lines),
             .allocator = allocator,
         };
+    }
+
+    /// Execute a full AWK program on GPU using bytecode VM
+    /// The bytecode must be pre-compiled using the bytecode compiler
+    pub fn executeBytecode(self: *Self, bc: mod.GpuBytecode, text: []const u8, options: AwkOptions, allocator: std.mem.Allocator) ![]u8 {
+        const vm_pipe = self.vm_pipeline orelse return error.VmNotSupported;
+
+        if (text.len > MAX_GPU_BUFFER_SIZE) return error.TextTooLarge;
+
+        // Find line boundaries
+        var line_offsets: std.ArrayListUnmanaged(u32) = .{};
+        defer line_offsets.deinit(allocator);
+        var line_lengths: std.ArrayListUnmanaged(u32) = .{};
+        defer line_lengths.deinit(allocator);
+
+        var line_start: usize = 0;
+        for (text, 0..) |c, i| {
+            if (c == '\n') {
+                try line_offsets.append(allocator, @intCast(line_start));
+                try line_lengths.append(allocator, @intCast(i - line_start));
+                line_start = i + 1;
+            }
+        }
+        if (line_start < text.len) {
+            try line_offsets.append(allocator, @intCast(line_start));
+            try line_lengths.append(allocator, @intCast(text.len - line_start));
+        }
+
+        const num_lines = line_offsets.items.len;
+        if (num_lines == 0) {
+            return try allocator.dupe(u8, "");
+        }
+
+        const max_output_per_thread: u32 = 1024;
+        const total_output_size = num_lines * max_output_per_thread;
+
+        // Create buffers
+        var text_buffer = self.device.newBufferWithLengthOptions(text.len, mtl.MTLResourceOptions.MTLResourceCPUCacheModeDefaultCache) orelse return error.BufferCreationFailed;
+        defer text_buffer.release();
+        if (text_buffer.contents()) |ptr| {
+            @memcpy(@as([*]u8, @ptrCast(ptr))[0..text.len], text);
+        }
+
+        const bytecode_size = bc.instructions.len * @sizeOf(mod.Instruction);
+        var bytecode_buffer = self.device.newBufferWithLengthOptions(@max(bytecode_size, 4), mtl.MTLResourceOptions.MTLResourceCPUCacheModeDefaultCache) orelse return error.BufferCreationFailed;
+        defer bytecode_buffer.release();
+        if (bytecode_size > 0) {
+            if (bytecode_buffer.contents()) |ptr| {
+                @memcpy(@as([*]mod.Instruction, @ptrCast(@alignCast(ptr)))[0..bc.instructions.len], bc.instructions);
+            }
+        }
+
+        const constants_size = bc.num_constants.len * @sizeOf(f32);
+        var constants_buffer = self.device.newBufferWithLengthOptions(@max(constants_size, 4), mtl.MTLResourceOptions.MTLResourceCPUCacheModeDefaultCache) orelse return error.BufferCreationFailed;
+        defer constants_buffer.release();
+        if (constants_size > 0) {
+            if (constants_buffer.contents()) |ptr| {
+                @memcpy(@as([*]f32, @ptrCast(@alignCast(ptr)))[0..bc.num_constants.len], bc.num_constants);
+            }
+        }
+
+        // String pool buffer (minimal for now)
+        var str_pool_buffer = self.device.newBufferWithLengthOptions(4, mtl.MTLResourceOptions.MTLResourceCPUCacheModeDefaultCache) orelse return error.BufferCreationFailed;
+        defer str_pool_buffer.release();
+
+        // Field separator buffer
+        var field_sep_buffer = self.device.newBufferWithLengthOptions(@max(options.field_separator.len, 1), mtl.MTLResourceOptions.MTLResourceCPUCacheModeDefaultCache) orelse return error.BufferCreationFailed;
+        defer field_sep_buffer.release();
+        if (field_sep_buffer.contents()) |ptr| {
+            @memcpy(@as([*]u8, @ptrCast(ptr))[0..options.field_separator.len], options.field_separator);
+        }
+
+        // VM config
+        const vm_config = mod.VmConfig{
+            .num_instructions = @intCast(bc.instructions.len),
+            .num_constants = @intCast(bc.num_constants.len),
+            .num_variables = bc.num_variables,
+            .stack_size = 32,
+            .max_output_per_thread = max_output_per_thread,
+            .main_offset = bc.main_offset,
+            .flags = options.toFlags(),
+            ._pad = 0,
+        };
+        var config_buffer = self.device.newBufferWithLengthOptions(@sizeOf(mod.VmConfig), mtl.MTLResourceOptions.MTLResourceCPUCacheModeDefaultCache) orelse return error.BufferCreationFailed;
+        defer config_buffer.release();
+        if (config_buffer.contents()) |ptr| {
+            @as(*mod.VmConfig, @ptrCast(@alignCast(ptr))).* = vm_config;
+        }
+
+        // Output buffer
+        var output_buffer = self.device.newBufferWithLengthOptions(total_output_size, mtl.MTLResourceOptions.MTLResourceCPUCacheModeDefaultCache) orelse return error.BufferCreationFailed;
+        defer output_buffer.release();
+
+        // Output offsets buffer
+        var output_offsets_buffer = self.device.newBufferWithLengthOptions(num_lines * @sizeOf(u32), mtl.MTLResourceOptions.MTLResourceCPUCacheModeDefaultCache) orelse return error.BufferCreationFailed;
+        defer output_offsets_buffer.release();
+        if (output_offsets_buffer.contents()) |ptr| {
+            @memset(@as([*]u32, @ptrCast(@alignCast(ptr)))[0..num_lines], 0);
+        }
+
+        // Line offsets/lengths buffers
+        var line_offsets_buffer = self.device.newBufferWithLengthOptions(line_offsets.items.len * @sizeOf(u32), mtl.MTLResourceOptions.MTLResourceCPUCacheModeDefaultCache) orelse return error.BufferCreationFailed;
+        defer line_offsets_buffer.release();
+        if (line_offsets_buffer.contents()) |ptr| {
+            @memcpy(@as([*]u32, @ptrCast(@alignCast(ptr)))[0..line_offsets.items.len], line_offsets.items);
+        }
+
+        var line_lengths_buffer = self.device.newBufferWithLengthOptions(line_lengths.items.len * @sizeOf(u32), mtl.MTLResourceOptions.MTLResourceCPUCacheModeDefaultCache) orelse return error.BufferCreationFailed;
+        defer line_lengths_buffer.release();
+        if (line_lengths_buffer.contents()) |ptr| {
+            @memcpy(@as([*]u32, @ptrCast(@alignCast(ptr)))[0..line_lengths.items.len], line_lengths.items);
+        }
+
+        // Execute VM
+        var cmd_buffer = self.command_queue.commandBuffer() orelse return error.CommandBufferFailed;
+        var encoder = cmd_buffer.computeCommandEncoder() orelse return error.EncoderFailed;
+
+        encoder.setComputePipelineState(vm_pipe);
+        encoder.setBufferOffsetAtIndex(text_buffer, 0, 0);
+        encoder.setBufferOffsetAtIndex(bytecode_buffer, 0, 1);
+        encoder.setBufferOffsetAtIndex(constants_buffer, 0, 2);
+        encoder.setBufferOffsetAtIndex(str_pool_buffer, 0, 3);
+        encoder.setBufferOffsetAtIndex(field_sep_buffer, 0, 4);
+        encoder.setBufferOffsetAtIndex(config_buffer, 0, 5);
+        encoder.setBufferOffsetAtIndex(output_buffer, 0, 6);
+        encoder.setBufferOffsetAtIndex(output_offsets_buffer, 0, 7);
+        encoder.setBufferOffsetAtIndex(line_offsets_buffer, 0, 8);
+        encoder.setBufferOffsetAtIndex(line_lengths_buffer, 0, 9);
+
+        const grid_size = mtl.MTLSize{ .width = num_lines, .height = 1, .depth = 1 };
+        const threadgroup_size = mtl.MTLSize{ .width = @min(self.threads_per_group, num_lines), .height = 1, .depth = 1 };
+
+        encoder.dispatchThreadsThreadsPerThreadgroup(grid_size, threadgroup_size);
+        encoder.endEncoding();
+        cmd_buffer.commit();
+        cmd_buffer.waitUntilCompleted();
+
+        // Collect output
+        const offsets_ptr: [*]u32 = @ptrCast(@alignCast(output_offsets_buffer.contents()));
+        const output_ptr: [*]u8 = @ptrCast(output_buffer.contents());
+
+        var total_len: usize = 0;
+        for (0..num_lines) |i| {
+            total_len += offsets_ptr[i];
+        }
+
+        const result = try allocator.alloc(u8, total_len);
+        var write_pos: usize = 0;
+        for (0..num_lines) |i| {
+            const len = offsets_ptr[i];
+            const start = i * max_output_per_thread;
+            @memcpy(result[write_pos .. write_pos + len], output_ptr[start .. start + len]);
+            write_pos += len;
+        }
+
+        return result;
     }
 };
