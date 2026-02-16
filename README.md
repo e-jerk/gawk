@@ -11,7 +11,17 @@ A high-performance `awk` replacement that uses GPU acceleration via Metal (macOS
 
 ## Installation
 
-Available via Homebrew. See the homebrew-utils repository for installation instructions.
+Homebrew formulas are now maintained in [e-jerk/utils](https://github.com/e-jerk/homebrew-utils) (pure GPU versions) and [e-jerk/utils-gnu](https://github.com/e-jerk/homebrew-utils-gnu) (GNU-fallback versions).
+
+```bash
+# Pure GPU version (no dependencies)
+brew tap e-jerk/utils
+brew install e-jerk/utils/gawk
+
+# GNU-fallback version (with GNU fallback support)
+brew tap e-jerk/utils-gnu
+brew install e-jerk/utils-gnu/gawk
+```
 
 ## Usage
 
