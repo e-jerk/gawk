@@ -14,5 +14,3 @@ jobs:
     uses: e-jerk/.github/.github/workflows/release.yml@main
     with:
       binary_name: gawk
-    secrets:
-      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
