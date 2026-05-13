@@ -106,6 +106,57 @@ pub fn main() !u8 {
                 program_text = try allocator.dupe(u8, args[i]);
                 program_text_allocated = true;
             }
+        } else if (std.mem.eql(u8, arg, "--assign") and i + 1 < args.len) {
+            // --assign is an alias for -v
+            i += 1;
+            const assign = args[i];
+            if (std.mem.indexOf(u8, assign, "=")) |eq_pos| {
+                const var_name = assign[0..eq_pos];
+                const var_val = assign[eq_pos + 1..];
+                const name_copy = try allocator.dupe(u8, var_name);
+                const val_copy = try allocator.dupe(u8, var_val);
+                try variables.put(allocator, name_copy, val_copy);
+            } else {
+                std.debug.print("gawk: invalid --assign assignment: {s}\n", .{assign});
+                return 2;
+            }
+        } else if (std.mem.eql(u8, arg, "--version")) {
+            _ = std.posix.write(std.posix.STDOUT_FILENO, "gawk (e-jerk GPU-accelerated) 1.0\n") catch {};
+            return 0;
+        } else if (std.mem.eql(u8, arg, "--traditional") or std.mem.eql(u8, arg, "-c")) {
+            options.traditional_mode = true;
+        } else if (std.mem.eql(u8, arg, "--posix") or std.mem.eql(u8, arg, "-P")) {
+            options.posix_mode = true;
+        } else if (std.mem.eql(u8, arg, "--lint")) {
+            options.lint_mode = true;
+        } else if (std.mem.eql(u8, arg, "--dump-variables")) {
+            options.dump_variables = true;
+        } else if (std.mem.eql(u8, arg, "--profile")) {
+            options.profile_mode = true;
+        } else if (std.mem.eql(u8, arg, "-W") and i + 1 < args.len) {
+            i += 1;
+            const w_arg = args[i];
+            if (std.mem.eql(u8, w_arg, "traditional")) {
+                options.traditional_mode = true;
+            } else if (std.mem.eql(u8, w_arg, "posix")) {
+                options.posix_mode = true;
+            } else if (std.mem.eql(u8, w_arg, "lint")) {
+                options.lint_mode = true;
+            } else if (std.mem.eql(u8, w_arg, "dump-variables")) {
+                options.dump_variables = true;
+            } else if (std.mem.eql(u8, w_arg, "profile")) {
+                options.profile_mode = true;
+            } else if (std.mem.eql(u8, w_arg, "version")) {
+                _ = std.posix.write(std.posix.STDOUT_FILENO, "gawk (e-jerk GPU-accelerated) 1.0\n") catch {};
+                return 0;
+            } else if (std.mem.startsWith(u8, w_arg, "dump-variables=")) {
+                options.dump_variables = true;
+            } else if (std.mem.startsWith(u8, w_arg, "profile=")) {
+                options.profile_mode = true;
+            } else {
+                std.debug.print("gawk: unknown -W option: {s}\n", .{w_arg});
+                return 2;
+            }
         } else if (std.mem.eql(u8, arg, "--verbose")) {
             verbose = true;
         } else if (std.mem.eql(u8, arg, "--backend") and i + 1 < args.len) {
@@ -720,8 +771,17 @@ fn printHelp() void {
         \\
         \\Options:
         \\  -F SEP         Use SEP as field separator (default: whitespace)
+        \\  -v var=val     Assign value to variable before execution
+        \\  --assign var=val  Same as -v
+        \\  -f file        Read program from file
+        \\  -e 'program'   Inline program source
         \\  -i             Case-insensitive pattern matching     [GPU+SIMD]
-        \\  -v             Invert match (print non-matching)     [GPU+SIMD]
+        \\  --invert-match  Invert match (print non-matching)   [GPU+SIMD]
+        \\  -c, --traditional  Traditional mode (no GNU extensions)
+        \\  -P, --posix     POSIX compatibility mode
+        \\  --lint         Enable lint warnings
+        \\  --dump-variables Dump variables to file on exit
+        \\  --profile      Enable profiling
         \\  --backend MODE Backend: auto, cpu, gnu, gpu, metal, vulkan
         \\  --cpu          Force CPU backend (SIMD-optimized)
         \\  --gnu          Force GNU backend (gawk reference)
@@ -729,6 +789,7 @@ fn printHelp() void {
         \\  --metal        Force Metal backend (macOS)
         \\  --vulkan       Force Vulkan backend (macOS+gnu or Linux)
         \\  --verbose      Print backend selection and timing info
+        \\  --version      Print version information
         \\  -h, --help     Show this help
         \\
         \\Built-in Functions:                              [GPU+SIMD]

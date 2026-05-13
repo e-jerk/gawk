@@ -155,6 +155,11 @@ pub const AwkOptions = struct {
     output_field_separator: []const u8 = " ",
     requested_fields: []const u32 = &.{},
     global_substitution: bool = true,
+    traditional_mode: bool = false, // --traditional / -c
+    posix_mode: bool = false, // --posix / -P
+    lint_mode: bool = false, // --lint / -W lint
+    dump_variables: bool = false, // --dump-variables
+    profile_mode: bool = false, // --profile
 
     pub fn toFlags(self: AwkOptions) u32 {
         var flags: u32 = 0;
