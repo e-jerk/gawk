@@ -651,6 +651,8 @@ pub const Parser = struct {
         // Check for for-in loop
         if (self.check(.identifier)) {
             const saved_pos = self.tokenizer.pos;
+            const saved_current = self.current;
+            const saved_previous = self.previous;
             const var_name = self.current.lexeme;
             self.advance();
 
@@ -673,7 +675,8 @@ pub const Parser = struct {
 
             // Not a for-in, reset
             self.tokenizer.pos = saved_pos;
-            self.advance();
+            self.current = saved_current;
+            self.previous = saved_previous;
         }
 
         // Regular for loop: for (init; cond; update)

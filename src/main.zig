@@ -940,6 +940,16 @@ fn needsFullParser(program: []const u8) bool {
         "printf",
         "gensub",
         "match",
+        "asort",
+        "asorti",
+        "typeof",
+        "and",
+        "or",
+        "xor",
+        "compl",
+        "lshift",
+        "rshift",
+        "IGNORECASE",
     };
 
     for (complex_keywords) |kw| {

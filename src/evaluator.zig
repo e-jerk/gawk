@@ -69,6 +69,12 @@ pub const Evaluator = struct {
     /// Output record separator
     ors: []const u8 = "\n",
 
+    /// Record separator
+    rs: []const u8 = "\n",
+
+    /// IGNORECASE flag
+    ignorecase: bool = false,
+
     /// Line number (NR)
     nr: u64 = 0,
 
@@ -202,13 +208,62 @@ pub const Evaluator = struct {
             }
         }
 
-        // Process each input line
-        var line_iter = std.mem.splitScalar(u8, input, '\n');
-        var is_first = true;
-        while (line_iter.next()) |line| {
-            // Skip trailing empty line from final newline
-            if (line.len == 0 and !is_first and line_iter.rest().len == 0) continue;
-            is_first = false;
+        // Process each input record based on RS
+        var records: std.ArrayListUnmanaged([]const u8) = .{};
+        defer records.deinit(self.allocator);
+        if (self.rs.len == 0) {
+            // Paragraph mode: split on one or more blank lines
+            var start: usize = 0;
+            var i: usize = 0;
+            while (i < input.len) {
+                if (input[i] == '\n') {
+                    var blank_count: usize = 1;
+                    var j = i + 1;
+                    while (j < input.len and input[j] == '\n') : (j += 1) {
+                        blank_count += 1;
+                    }
+                    if (blank_count >= 2) {
+                        // End of paragraph; record is text before the blank lines
+                        const rec = input[start..i];
+                        if (rec.len > 0) {
+                            try records.append(self.allocator, rec);
+                        }
+                        start = j;
+                        i = j;
+                    } else {
+                        i += 1;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            if (start < input.len) {
+                const rec = input[start..];
+                if (rec.len > 0) {
+                    try records.append(self.allocator, rec);
+                }
+            }
+        } else if (self.rs.len == 1) {
+            // Single-character RS
+            var iter = std.mem.splitScalar(u8, input, self.rs[0]);
+            while (iter.next()) |rec| {
+                try records.append(self.allocator, rec);
+            }
+        } else {
+            // Multi-character RS
+            var iter = std.mem.splitSequence(u8, input, self.rs);
+            while (iter.next()) |rec| {
+                try records.append(self.allocator, rec);
+            }
+        }
+
+        for (records.items) |line| {
+            // Skip trailing empty record from final RS
+            if (line.len == 0) {
+                // Only skip if it's the very last record and input ended with RS
+                const is_last = (&line[0] == &records.items[records.items.len - 1][0]);
+                if (is_last and (input.len == 0 or input[input.len - 1] == self.rs[0])) continue;
+            }
             self.nr += 1;
             self.fnr += 1;
             self.setCurrentLine(line);
@@ -726,7 +781,7 @@ pub const Evaluator = struct {
 
             .regex_literal => |pattern| {
                 // When used as expression, match against $0
-                if (matchRegex(self.current_line, pattern)) {
+                if (self.matchRegex(self.current_line, pattern)) {
                     return Value.initNumber(1.0);
                 }
                 return Value.initNumber(0.0);
@@ -755,6 +810,8 @@ pub const Evaluator = struct {
                 if (std.mem.eql(u8, name, "FS")) return Value.initString(self.field_separator);
                 if (std.mem.eql(u8, name, "OFS")) return Value.initString(self.ofs);
                 if (std.mem.eql(u8, name, "ORS")) return Value.initString(self.ors);
+                if (std.mem.eql(u8, name, "RS")) return Value.initString(self.rs);
+                if (std.mem.eql(u8, name, "IGNORECASE")) return Value.initNumber(if (self.ignorecase) 1.0 else 0.0);
                 if (std.mem.eql(u8, name, "FILENAME")) return Value.initString(self.filename);
                 if (std.mem.eql(u8, name, "RSTART")) return Value.initNumber(@floatFromInt(self.rstart));
                 if (std.mem.eql(u8, name, "RLENGTH")) return Value.initNumber(@floatFromInt(self.rlength));
@@ -862,7 +919,7 @@ pub const Evaluator = struct {
                     },
                 };
 
-                const matches = matchRegex(string_str, pattern_str);
+                const matches = self.matchRegex(string_str, pattern_str);
                 const result = if (rm.negated) !matches else matches;
                 return Value.initNumber(if (result) 1.0 else 0.0);
             },
@@ -923,6 +980,32 @@ pub const Evaluator = struct {
         if (std.mem.eql(u8, name, "ORS")) {
             const str = try value.asString(self.allocator);
             self.ors = str;
+            return;
+        }
+        if (std.mem.eql(u8, name, "RS")) {
+            const str = try value.asString(self.allocator);
+            self.rs = str;
+            return;
+        }
+        if (std.mem.eql(u8, name, "IGNORECASE")) {
+            self.ignorecase = value.isTruthy();
+            return;
+        }
+        if (std.mem.eql(u8, name, "NF")) {
+            const new_nf = @as(usize, @intFromFloat(@max(0.0, value.asNumber())));
+            if (new_nf < self.fields.items.len) {
+                // Truncate fields and rebuild $0
+                self.fields.items.len = new_nf;
+                var new_line = std.ArrayListUnmanaged(u8){};
+                errdefer new_line.deinit(self.allocator);
+                for (self.fields.items, 0..) |field, i| {
+                    if (i > 0) try new_line.appendSlice(self.allocator, self.ofs);
+                    try new_line.appendSlice(self.allocator, field);
+                }
+                const owned = try new_line.toOwnedSlice(self.allocator);
+                self.current_line = owned;
+                self.nf = new_nf;
+            }
             return;
         }
 
@@ -1190,19 +1273,23 @@ pub const Evaluator = struct {
             var early_break = false;
             while (pos <= target.len) {
                 // Use simple literal matching for now (regex engine findAll has issues)
-                if (std.mem.indexOfPos(u8, target, pos, pat_str)) |match_start| {
+                const match_start = if (self.ignorecase)
+                    std.ascii.indexOfIgnoreCasePos(target, pos, pat_str)
+                else
+                    std.mem.indexOfPos(u8, target, pos, pat_str);
+                if (match_start) |ms| {
                     match_count += 1;
-                    const match_end = match_start + pat_str.len;
+                    const match_end = ms + pat_str.len;
 
                     if (global or match_count == which_match) {
                         // Copy text before match
-                        try result.appendSlice(self.allocator, target[pos..match_start]);
+                        try result.appendSlice(self.allocator, target[pos..ms]);
 
                         // Apply replacement with & and \0
                         var ri: usize = 0;
                         while (ri < repl_str.len) : (ri += 1) {
                             if (repl_str[ri] == '&' and (ri == 0 or repl_str[ri - 1] != '\\')) {
-                                try result.appendSlice(self.allocator, target[match_start..match_end]);
+                                try result.appendSlice(self.allocator, target[ms..match_end]);
                             } else if (repl_str[ri] == '\\' and ri + 1 < repl_str.len) {
                                 ri += 1;
                                 const esc = repl_str[ri];
@@ -1244,6 +1331,92 @@ pub const Evaluator = struct {
             return Value.initStringOwned(output, self.allocator);
         }
 
+        if (std.mem.eql(u8, name, "gsub") or std.mem.eql(u8, name, "sub")) {
+            const is_gsub = std.mem.eql(u8, name, "gsub");
+            if (args.len < 2) return Value.initNumber(0.0);
+            const pat_str = switch (args[0].kind) {
+                .regex_literal => |p| p,
+                else => blk: {
+                    const pat_val = try self.evaluateExpression(args[0]);
+                    break :blk try pat_val.asString(self.allocator);
+                },
+            };
+            const repl_val = try self.evaluateExpression(args[1]);
+            const repl_str = try repl_val.asString(self.allocator);
+
+            // Target: optional third arg, or $0
+            const target_expr = if (args.len >= 3) args[2] else null;
+            const target_name = if (target_expr) |te| switch (te.kind) {
+                .variable => |n| n,
+                else => null,
+            } else null;
+
+            var target = if (target_expr) |te| try (try self.evaluateExpression(te)).asString(self.allocator) else self.current_line;
+
+            var result: std.ArrayListUnmanaged(u8) = .{};
+            errdefer result.deinit(self.allocator);
+
+            var pos: usize = 0;
+            var match_count: usize = 0;
+            var early_break = false;
+            while (pos <= target.len) {
+                const match_start = if (self.ignorecase)
+                    std.ascii.indexOfIgnoreCasePos(target, pos, pat_str)
+                else
+                    std.mem.indexOfPos(u8, target, pos, pat_str);
+                if (match_start) |ms| {
+                    match_count += 1;
+                    const match_end = ms + pat_str.len;
+                    try result.appendSlice(self.allocator, target[pos..ms]);
+                    // Apply replacement with & and \
+                    var ri: usize = 0;
+                    while (ri < repl_str.len) : (ri += 1) {
+                        if (repl_str[ri] == '&' and (ri == 0 or repl_str[ri - 1] != '\\')) {
+                            try result.appendSlice(self.allocator, target[ms..match_end]);
+                        } else if (repl_str[ri] == '\\' and ri + 1 < repl_str.len) {
+                            ri += 1;
+                            const esc = repl_str[ri];
+                            if (esc == '&') {
+                                try result.append(self.allocator, '&');
+                            } else if (esc == '\\') {
+                                try result.append(self.allocator, '\\');
+                            } else {
+                                try result.append(self.allocator, '\\');
+                                try result.append(self.allocator, esc);
+                            }
+                        } else {
+                            try result.append(self.allocator, repl_str[ri]);
+                        }
+                    }
+                    pos = match_end;
+                    if (!is_gsub) {
+                        early_break = true;
+                        break;
+                    }
+                } else {
+                    try result.appendSlice(self.allocator, target[pos..]);
+                    break;
+                }
+            }
+            if (early_break) {
+                try result.appendSlice(self.allocator, target[pos..]);
+            }
+
+            const output = try result.toOwnedSlice(self.allocator);
+            if (target_expr != null) {
+                if (target_name) |tn| {
+                    try self.setVariable(tn, Value.initStringOwned(output, self.allocator));
+                } else {
+                    // For non-variable targets (like $1), need to handle differently
+                    self.allocator.free(output);
+                }
+            } else {
+                // Modify $0
+                self.setCurrentLine(output);
+            }
+            return Value.initNumber(@floatFromInt(match_count));
+        }
+
         if (std.mem.eql(u8, name, "match")) {
             // match(string, pattern [, array])
             if (args.len < 2) return Value.initNumber(0.0);
@@ -1257,9 +1430,13 @@ pub const Evaluator = struct {
                 },
             };
 
-            // Simple literal matching for now
-            if (std.mem.indexOf(u8, str, pat_str)) |pos| {
-                self.rstart = pos + 1; // 1-based
+            // Literal matching (regex engine findAll has state issues with iteration)
+            const pos = if (self.ignorecase)
+                std.ascii.indexOfIgnoreCase(str, pat_str)
+            else
+                std.mem.indexOf(u8, str, pat_str);
+            if (pos) |p| {
+                self.rstart = p + 1; // 1-based
                 self.rlength = @intCast(pat_str.len);
 
                 // Optional array argument for capture groups
@@ -1280,11 +1457,11 @@ pub const Evaluator = struct {
                         }
                         // Store matched text
                         const key0 = try self.allocator.dupe(u8, "0");
-                        const val0 = try self.allocator.dupe(u8, str[pos..pos + pat_str.len]);
+                        const val0 = try self.allocator.dupe(u8, str[p..p + pat_str.len]);
                         try self.setArrayElement(aname, key0, Value.initStringOwned(val0, self.allocator));
                         // Store start position
                         const start_key = try self.allocator.dupe(u8, "start,0");
-                        const start_val = try std.fmt.allocPrint(self.allocator, "{d}", .{pos + 1});
+                        const start_val = try std.fmt.allocPrint(self.allocator, "{d}", .{p + 1});
                         try self.setArrayElement(aname, start_key, Value.initStringOwned(start_val, self.allocator));
                         // Store length
                         const len_key = try self.allocator.dupe(u8, "length,0");
@@ -1293,7 +1470,7 @@ pub const Evaluator = struct {
                     }
                 }
 
-                return Value.initNumber(@floatFromInt(pos + 1));
+                return Value.initNumber(@floatFromInt(p + 1));
             } else {
                 self.rstart = 0;
                 self.rlength = -1;
@@ -1434,6 +1611,136 @@ pub const Evaluator = struct {
             return Value.initNumber(@floatFromInt(timestamp));
         }
 
+        if (std.mem.eql(u8, name, "asort") or std.mem.eql(u8, name, "asorti")) {
+            const is_asorti = std.mem.eql(u8, name, "asorti");
+            if (args.len == 0) return Value.initNumber(0.0);
+
+            // Get source array name
+            const src_name = switch (args[0].kind) {
+                .variable => |n| n,
+                else => return Value.initNumber(0.0),
+            };
+
+            // Get optional destination array name (defaults to source)
+            var dest_name = src_name;
+            if (args.len >= 2) {
+                dest_name = switch (args[1].kind) {
+                    .variable => |n| n,
+                    else => return Value.initNumber(0.0),
+                };
+            }
+
+            const ArrayItem = struct { key: []const u8, val: Value };
+
+            // Collect items from source array
+            var items = std.ArrayListUnmanaged(ArrayItem){};
+            defer {
+                for (items.items) |*item| {
+                    self.allocator.free(item.key);
+                }
+                items.deinit(self.allocator);
+            }
+
+            if (self.arrays.get(src_name)) |src_array| {
+                var it = src_array.iterator();
+                while (it.next()) |entry| {
+                    const key_copy = try self.allocator.dupe(u8, entry.key_ptr.*);
+                    const val_copy = try entry.value_ptr.*.clone(self.allocator);
+                    try items.append(self.allocator, .{ .key = key_copy, .val = val_copy });
+                }
+            }
+
+            // Sort
+            const SortCtx = struct {
+                allocator: std.mem.Allocator,
+                is_asorti: bool,
+                pub fn lessThan(ctx: @This(), a: ArrayItem, b: ArrayItem) bool {
+                    if (ctx.is_asorti) {
+                        return std.mem.lessThan(u8, a.key, b.key);
+                    } else {
+                        const a_str = a.val.asString(ctx.allocator) catch "";
+                        defer ctx.allocator.free(a_str);
+                        const b_str = b.val.asString(ctx.allocator) catch "";
+                        defer ctx.allocator.free(b_str);
+                        return std.mem.lessThan(u8, a_str, b_str);
+                    }
+                }
+            };
+            std.mem.sort(ArrayItem, items.items, SortCtx{ .allocator = self.allocator, .is_asorti = is_asorti }, SortCtx.lessThan);
+
+            // Clear destination array
+            if (self.arrays.getPtr(dest_name)) |array| {
+                var it = array.iterator();
+                while (it.next()) |entry| {
+                    var v = entry.value_ptr.*;
+                    v.deinit();
+                }
+                array.clearAndFree(self.allocator);
+            }
+
+            // Write sorted items to destination array with 1-based indices
+            for (items.items, 0..) |item, i| {
+                const idx = i + 1;
+                const key_str = try std.fmt.allocPrint(self.allocator, "{d}", .{idx});
+                defer self.allocator.free(key_str);
+                if (is_asorti) {
+                    const val_copy = try self.allocator.dupe(u8, item.key);
+                    try self.setArrayElement(dest_name, key_str, Value.initStringOwned(val_copy, self.allocator));
+                } else {
+                    try self.setArrayElement(dest_name, key_str, item.val);
+                }
+            }
+
+            return Value.initNumber(@floatFromInt(items.items.len));
+        }
+
+        // Bitwise functions
+        if (std.mem.eql(u8, name, "and") or std.mem.eql(u8, name, "or") or std.mem.eql(u8, name, "xor")) {
+            if (args.len < 2) return Value.initNumber(0.0);
+            var result: i64 = @as(i64, @intFromFloat((try self.evaluateExpression(args[0])).asNumber()));
+            for (args[1..]) |arg| {
+                const val: i64 = @as(i64, @intFromFloat((try self.evaluateExpression(arg)).asNumber()));
+                if (std.mem.eql(u8, name, "and")) {
+                    result &= val;
+                } else if (std.mem.eql(u8, name, "or")) {
+                    result |= val;
+                } else {
+                    result ^= val;
+                }
+            }
+            return Value.initNumber(@floatFromInt(result));
+        }
+
+        if (std.mem.eql(u8, name, "compl")) {
+            if (args.len == 0) return Value.initNumber(0.0);
+            const val: i64 = @as(i64, @intFromFloat((try self.evaluateExpression(args[0])).asNumber()));
+            return Value.initNumber(@floatFromInt(~val));
+        }
+
+        if (std.mem.eql(u8, name, "lshift")) {
+            if (args.len < 2) return Value.initNumber(0.0);
+            const val: i64 = @as(i64, @intFromFloat((try self.evaluateExpression(args[0])).asNumber()));
+            const count: i64 = @as(i64, @intFromFloat((try self.evaluateExpression(args[1])).asNumber()));
+            return Value.initNumber(@floatFromInt(val << @intCast(count)));
+        }
+
+        if (std.mem.eql(u8, name, "rshift")) {
+            if (args.len < 2) return Value.initNumber(0.0);
+            const val: i64 = @as(i64, @intFromFloat((try self.evaluateExpression(args[0])).asNumber()));
+            const count: i64 = @as(i64, @intFromFloat((try self.evaluateExpression(args[1])).asNumber()));
+            return Value.initNumber(@floatFromInt(val >> @intCast(count)));
+        }
+
+        if (std.mem.eql(u8, name, "typeof")) {
+            if (args.len == 0) return Value.initString("unassigned");
+            const val = try self.evaluateExpression(args[0]);
+            if (val.flags.has_string) {
+                return Value.initString("string");
+            }
+            if (val.flags.has_number) return Value.initString("number");
+            return Value.initString("unassigned");
+        }
+
         // User-defined function
         if (self.functions.get(name)) |func| {
             // Save current variables (simple scoping)
@@ -1476,9 +1783,11 @@ pub const Evaluator = struct {
         return EvalError.UndefinedFunction;
     }
 
-    fn matchRegex(text: []const u8, pattern: []const u8) bool {
-        // Simple literal matching for now
-        // TODO: Use regex library
+    fn matchRegex(self: *Evaluator, text: []const u8, pattern: []const u8) bool {
+        if (self.ignorecase) {
+            // Case-insensitive literal matching
+            return std.ascii.indexOfIgnoreCase(text, pattern) != null;
+        }
         return std.mem.indexOf(u8, text, pattern) != null;
     }
 };
