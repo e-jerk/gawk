@@ -939,6 +939,7 @@ fn needsFullParser(program: []const u8) bool {
         "delete",
         "printf",
         "gensub",
+        "match",
     };
 
     for (complex_keywords) |kw| {

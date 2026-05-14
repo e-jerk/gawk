@@ -81,6 +81,12 @@ pub const Evaluator = struct {
     /// Current filename
     filename: []const u8 = "",
 
+    /// RSTART: start position of last match (1-based, 0 if no match)
+    rstart: u64 = 0,
+
+    /// RLENGTH: length of last match (-1 if no match)
+    rlength: i64 = -1,
+
     /// Output buffer
     output: std.ArrayListUnmanaged(u8) = .{},
 
@@ -750,6 +756,8 @@ pub const Evaluator = struct {
                 if (std.mem.eql(u8, name, "OFS")) return Value.initString(self.ofs);
                 if (std.mem.eql(u8, name, "ORS")) return Value.initString(self.ors);
                 if (std.mem.eql(u8, name, "FILENAME")) return Value.initString(self.filename);
+                if (std.mem.eql(u8, name, "RSTART")) return Value.initNumber(@floatFromInt(self.rstart));
+                if (std.mem.eql(u8, name, "RLENGTH")) return Value.initNumber(@floatFromInt(self.rlength));
 
                 if (self.variables.get(name)) |val| {
                     return val;
@@ -1234,6 +1242,63 @@ pub const Evaluator = struct {
 
             const output = try result.toOwnedSlice(self.allocator);
             return Value.initStringOwned(output, self.allocator);
+        }
+
+        if (std.mem.eql(u8, name, "match")) {
+            // match(string, pattern [, array])
+            if (args.len < 2) return Value.initNumber(0.0);
+            const str_val = try self.evaluateExpression(args[0]);
+            const str = try str_val.asString(self.allocator);
+            const pat_str = switch (args[1].kind) {
+                .regex_literal => |p| p,
+                else => blk: {
+                    const pat_val = try self.evaluateExpression(args[1]);
+                    break :blk try pat_val.asString(self.allocator);
+                },
+            };
+
+            // Simple literal matching for now
+            if (std.mem.indexOf(u8, str, pat_str)) |pos| {
+                self.rstart = pos + 1; // 1-based
+                self.rlength = @intCast(pat_str.len);
+
+                // Optional array argument for capture groups
+                if (args.len >= 3) {
+                    const array_name = switch (args[2].kind) {
+                        .variable => |n| n,
+                        else => null,
+                    };
+                    if (array_name) |aname| {
+                        // Clear array
+                        if (self.arrays.getPtr(aname)) |array| {
+                            var it = array.iterator();
+                            while (it.next()) |entry| {
+                                var v = entry.value_ptr.*;
+                                v.deinit();
+                            }
+                            array.clearAndFree(self.allocator);
+                        }
+                        // Store matched text
+                        const key0 = try self.allocator.dupe(u8, "0");
+                        const val0 = try self.allocator.dupe(u8, str[pos..pos + pat_str.len]);
+                        try self.setArrayElement(aname, key0, Value.initStringOwned(val0, self.allocator));
+                        // Store start position
+                        const start_key = try self.allocator.dupe(u8, "start,0");
+                        const start_val = try std.fmt.allocPrint(self.allocator, "{d}", .{pos + 1});
+                        try self.setArrayElement(aname, start_key, Value.initStringOwned(start_val, self.allocator));
+                        // Store length
+                        const len_key = try self.allocator.dupe(u8, "length,0");
+                        const len_val = try std.fmt.allocPrint(self.allocator, "{d}", .{pat_str.len});
+                        try self.setArrayElement(aname, len_key, Value.initStringOwned(len_val, self.allocator));
+                    }
+                }
+
+                return Value.initNumber(@floatFromInt(pos + 1));
+            } else {
+                self.rstart = 0;
+                self.rlength = -1;
+                return Value.initNumber(0.0);
+            }
         }
 
         if (std.mem.eql(u8, name, "systime")) {
