@@ -52,6 +52,9 @@ pub const Evaluator = struct {
     /// Current fields (computed lazily from current_line)
     fields: std.ArrayListUnmanaged([]const u8) = .{},
 
+    /// Open files for getline redirection
+    open_files: std.StringHashMapUnmanaged(std.fs.File) = .{},
+
     /// Field separator
     field_separator: []const u8 = " \t",
 
@@ -122,6 +125,12 @@ pub const Evaluator = struct {
 
         self.fields.deinit(self.allocator);
         self.output.deinit(self.allocator);
+
+        var file_it = self.open_files.iterator();
+        while (file_it.next()) |entry| {
+            entry.value_ptr.close();
+        }
+        self.open_files.deinit(self.allocator);
 
         if (self.return_value.flags.string_owned) {
             self.return_value.deinit();
@@ -411,12 +420,73 @@ pub const Evaluator = struct {
                 }
             },
 
-            .getline_stmt => |_| {
-                // TODO: Implement getline
+            .getline_stmt => |gl| {
+                const result = try self.executeGetline(gl.var_name, gl.file, null);
+                // getline statement result is ignored in statement context
+                _ = result;
             },
 
             .empty => {},
         }
+    }
+
+    fn executeGetline(self: *Evaluator, var_name: ?[]const u8, file_expr: ?*ast.Expression, pipe_expr: ?*ast.Expression) !Value {
+        _ = pipe_expr; // TODO: Support pipe getline
+
+        var line_buf: [4096]u8 = undefined;
+        var line: ?[]const u8 = null;
+
+        if (file_expr) |fe| {
+            const file_val = try self.evaluateExpression(fe);
+            const file_str = try file_val.asString(self.allocator);
+
+            // Check if file is already open
+            if (self.open_files.get(file_str)) |*file| {
+                const bytes_read = file.read(&line_buf) catch return Value.initNumber(-1.0);
+                if (bytes_read == 0) return Value.initNumber(0.0);
+                // Find newline
+                if (std.mem.indexOfScalar(u8, line_buf[0..bytes_read], '\n')) |nl| {
+                    line = line_buf[0..nl];
+                    // Seek back if we read past newline
+                    const past_newline = bytes_read - nl - 1;
+                    if (past_newline > 0) {
+                        file.seekBy(-@as(i64, @intCast(past_newline))) catch {};
+                    }
+                } else {
+                    line = line_buf[0..bytes_read];
+                }
+            } else {
+                const new_file = std.fs.cwd().openFile(file_str, .{}) catch return Value.initNumber(-1.0);
+                try self.open_files.put(self.allocator, try self.allocator.dupe(u8, file_str), new_file);
+                const bytes_read = new_file.read(&line_buf) catch return Value.initNumber(-1.0);
+                if (bytes_read == 0) return Value.initNumber(0.0);
+                if (std.mem.indexOfScalar(u8, line_buf[0..bytes_read], '\n')) |nl| {
+                    line = line_buf[0..nl];
+                    const past_newline = bytes_read - nl - 1;
+                    if (past_newline > 0) {
+                        new_file.seekBy(-@as(i64, @intCast(past_newline))) catch {};
+                    }
+                } else {
+                    line = line_buf[0..bytes_read];
+                }
+            }
+        } else {
+            // Read from next line of current input
+            // For now, return EOF
+            return Value.initNumber(0.0);
+        }
+
+        if (line) |l| {
+            if (var_name) |vn| {
+                try self.setVariable(vn, Value.initString(l));
+            } else {
+                // Default: assign to $0
+                self.setCurrentLine(l);
+            }
+            return Value.initNumber(1.0);
+        }
+
+        return Value.initNumber(0.0);
     }
 
     fn executePrint(self: *Evaluator, args: []*ast.Expression, output_file: ?*ast.Expression, _: bool) !void {
@@ -684,9 +754,8 @@ pub const Evaluator = struct {
                 return Value.initNumber(0.0);
             },
 
-            .getline => |_| {
-                // TODO: Implement getline expression
-                return Value.initNumber(0.0);
+            .getline => |gl| {
+                return self.executeGetline(gl.var_name, gl.file, gl.pipe_cmd);
             },
 
             .concat => |c| {
@@ -821,7 +890,8 @@ pub const Evaluator = struct {
                     count += 1;
                     const key = try std.fmt.allocPrint(self.allocator, "{d}", .{count});
                     defer self.allocator.free(key);
-                    try self.setArrayElement(array_name, key, Value.initString(part));
+                    const part_copy = try self.allocator.dupe(u8, part);
+                    try self.setArrayElement(array_name, key, Value.initStringOwned(part_copy, self.allocator));
                 }
             }
 
@@ -853,9 +923,72 @@ pub const Evaluator = struct {
         if (std.mem.eql(u8, name, "sprintf")) {
             // Basic sprintf - format first arg with remaining args
             if (args.len == 0) return Value.initEmpty();
-            // TODO: Implement full sprintf
             const format_val = try self.evaluateExpression(args[0]);
-            return format_val;
+            const format_str = try format_val.asString(self.allocator);
+
+            var result: std.ArrayListUnmanaged(u8) = .{};
+            errdefer result.deinit(self.allocator);
+
+            var arg_idx: usize = 1;
+            var fmt_pos: usize = 0;
+            while (fmt_pos < format_str.len) {
+                if (format_str[fmt_pos] == '%' and fmt_pos + 1 < format_str.len) {
+                    const spec = format_str[fmt_pos + 1];
+                    switch (spec) {
+                        '%' => try result.append(self.allocator, '%'),
+                        's', 'S' => {
+                            if (arg_idx < args.len) {
+                                const arg_val = try self.evaluateExpression(args[arg_idx]);
+                                const arg_str = try arg_val.asString(self.allocator);
+                                try result.appendSlice(self.allocator, arg_str);
+                                arg_idx += 1;
+                            }
+                        },
+                        'd', 'D', 'i', 'I' => {
+                            if (arg_idx < args.len) {
+                                const arg_val = try self.evaluateExpression(args[arg_idx]);
+                                const n = @as(i64, @intFromFloat(arg_val.asNumber()));
+                                const str = try std.fmt.allocPrint(self.allocator, "{d}", .{n});
+                                defer self.allocator.free(str);
+                                try result.appendSlice(self.allocator, str);
+                                arg_idx += 1;
+                            }
+                        },
+                        'f', 'F' => {
+                            if (arg_idx < args.len) {
+                                const arg_val = try self.evaluateExpression(args[arg_idx]);
+                                const n = arg_val.asNumber();
+                                const str = try std.fmt.allocPrint(self.allocator, "{d:.6}", .{n});
+                                defer self.allocator.free(str);
+                                try result.appendSlice(self.allocator, str);
+                                arg_idx += 1;
+                            }
+                        },
+                        'g', 'G' => {
+                            if (arg_idx < args.len) {
+                                const arg_val = try self.evaluateExpression(args[arg_idx]);
+                                const n = arg_val.asNumber();
+                                const str = try std.fmt.allocPrint(self.allocator, "{d:.6}", .{n});
+                                defer self.allocator.free(str);
+                                try result.appendSlice(self.allocator, str);
+                                arg_idx += 1;
+                            }
+                        },
+                        else => {
+                            // Unknown format specifier, copy literally
+                            try result.append(self.allocator, '%');
+                            try result.append(self.allocator, spec);
+                        },
+                    }
+                    fmt_pos += 2;
+                } else {
+                    try result.append(self.allocator, format_str[fmt_pos]);
+                    fmt_pos += 1;
+                }
+            }
+
+            const output = try result.toOwnedSlice(self.allocator);
+            return Value.initStringOwned(output, self.allocator);
         }
 
         if (std.mem.eql(u8, name, "sin")) {
