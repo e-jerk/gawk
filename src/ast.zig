@@ -12,8 +12,14 @@ pub const Program = struct {
     /// BEGIN block statements (executed before input processing)
     begin: ?*Statement = null,
 
+    /// BEGINFILE block statements (executed before each file)
+    beginfile: ?*Statement = null,
+
     /// Pattern-action rules (executed for each input line)
     rules: []Rule = &.{},
+
+    /// ENDFILE block statements (executed after each file)
+    endfile: ?*Statement = null,
 
     /// END block statements (executed after all input)
     end: ?*Statement = null,
@@ -25,11 +31,13 @@ pub const Program = struct {
 
     pub fn deinit(self: *Program) void {
         if (self.begin) |b| b.deinit(self.allocator);
+        if (self.beginfile) |bf| bf.deinit(self.allocator);
         for (self.rules) |rule| {
             if (rule.pattern) |p| p.deinit(self.allocator);
             rule.action.deinit(self.allocator);
         }
         if (self.rules.len > 0) self.allocator.free(self.rules);
+        if (self.endfile) |ef| ef.deinit(self.allocator);
         if (self.end) |e| e.deinit(self.allocator);
 
         var it = self.functions.iterator();
@@ -328,6 +336,7 @@ pub const Statement = struct {
             args: []*Expression,
             output_file: ?*Expression,
             append: bool, // >> vs >
+            pipe_cmd: ?*Expression,
         },
 
         /// Printf statement: printf "format", args...
@@ -336,6 +345,7 @@ pub const Statement = struct {
             args: []*Expression,
             output_file: ?*Expression,
             append: bool,
+            pipe_cmd: ?*Expression,
         },
 
         /// If statement: if (cond) stmt [else stmt]
@@ -380,6 +390,9 @@ pub const Statement = struct {
 
         /// Next statement (skip to next input line)
         next_stmt: void,
+
+        /// Nextfile statement (skip to next input file)
+        nextfile_stmt: void,
 
         /// Exit statement: exit [expr]
         exit_stmt: ?*Expression,
@@ -506,7 +519,7 @@ pub const Statement = struct {
                     allocator.destroy(f);
                 }
             },
-            .break_stmt, .continue_stmt, .next_stmt, .empty => {},
+            .break_stmt, .continue_stmt, .next_stmt, .nextfile_stmt, .empty => {},
         }
     }
 
@@ -527,7 +540,7 @@ pub const Statement = struct {
     /// Create a print statement
     pub fn print(allocator: Allocator, args: []*Expression) !*Statement {
         const stmt = try allocator.create(Statement);
-        stmt.* = .{ .kind = .{ .print = .{ .args = args, .output_file = null, .append = false } } };
+        stmt.* = .{ .kind = .{ .print = .{ .args = args, .output_file = null, .append = false, .pipe_cmd = null } } };
         return stmt;
     }
 };

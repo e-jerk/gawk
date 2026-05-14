@@ -31,11 +31,22 @@ pub fn main() !u8 {
     var verbose = false;
     var backend_mode: BackendMode = .auto;
     var is_substitution = false;
+    var substitution_global = true; // true = gsub, false = sub
     var builtin_call: ?BuiltinCall = null;
     var special_var: SpecialVar = .none;
     var allocated_fields: ?[]const u32 = null;
     defer if (allocated_fields) |f| allocator.free(f);
     var program_text: []const u8 = ""; // Original AWK program for full parsing
+    var program_text_allocated = false;
+    defer if (program_text_allocated) allocator.free(program_text);
+    var variables: std.StringHashMapUnmanaged([]const u8) = .{};
+    defer {
+        var var_it = variables.iterator();
+        while (var_it.next()) |entry| {
+            allocator.free(entry.value_ptr.*);
+        }
+        variables.deinit(allocator);
+    }
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -48,8 +59,105 @@ pub fn main() !u8 {
             options.field_separator = arg[2..];
         } else if (std.mem.eql(u8, arg, "-i")) {
             options.case_insensitive = true;
-        } else if (std.mem.eql(u8, arg, "-v")) {
+        } else if (std.mem.eql(u8, arg, "--invert-match")) {
             options.invert_match = true;
+        } else if (std.mem.eql(u8, arg, "-v") and i + 1 < args.len) {
+            i += 1;
+            const assign = args[i];
+            if (std.mem.indexOf(u8, assign, "=")) |eq_pos| {
+                const var_name = assign[0..eq_pos];
+                const var_val = assign[eq_pos + 1..];
+                const name_copy = try allocator.dupe(u8, var_name);
+                const val_copy = try allocator.dupe(u8, var_val);
+                try variables.put(allocator, name_copy, val_copy);
+            } else {
+                std.debug.print("gawk: invalid -v assignment: {s}\n", .{assign});
+                return 2;
+            }
+        } else if (std.mem.eql(u8, arg, "-f") and i + 1 < args.len) {
+            i += 1;
+            const file = std.fs.cwd().openFile(args[i], .{}) catch |err| {
+                std.debug.print("gawk: {s}: {}\n", .{ args[i], err });
+                return 2;
+            };
+            defer file.close();
+            const content = file.readToEndAlloc(allocator, 1024 * 1024) catch |err| {
+                std.debug.print("gawk: {s}: {}\n", .{ args[i], err });
+                return 2;
+            };
+            defer allocator.free(content);
+            // Concatenate to program_text
+            if (program_text.len > 0) {
+                const combined = try std.mem.concat(allocator, u8, &.{ program_text, "\n", content });
+                if (program_text_allocated) allocator.free(program_text);
+                program_text = combined;
+                program_text_allocated = true;
+            } else {
+                program_text = try allocator.dupe(u8, content);
+                program_text_allocated = true;
+            }
+        } else if (std.mem.eql(u8, arg, "-e") and i + 1 < args.len) {
+            i += 1;
+            if (program_text.len > 0) {
+                const combined = try std.mem.concat(allocator, u8, &.{ program_text, "\n", args[i] });
+                if (program_text_allocated) allocator.free(program_text);
+                program_text = combined;
+                program_text_allocated = true;
+            } else {
+                program_text = try allocator.dupe(u8, args[i]);
+                program_text_allocated = true;
+            }
+        } else if (std.mem.eql(u8, arg, "--assign") and i + 1 < args.len) {
+            // --assign is an alias for -v
+            i += 1;
+            const assign = args[i];
+            if (std.mem.indexOf(u8, assign, "=")) |eq_pos| {
+                const var_name = assign[0..eq_pos];
+                const var_val = assign[eq_pos + 1..];
+                const name_copy = try allocator.dupe(u8, var_name);
+                const val_copy = try allocator.dupe(u8, var_val);
+                try variables.put(allocator, name_copy, val_copy);
+            } else {
+                std.debug.print("gawk: invalid --assign assignment: {s}\n", .{assign});
+                return 2;
+            }
+        } else if (std.mem.eql(u8, arg, "--version")) {
+            _ = std.posix.write(std.posix.STDOUT_FILENO, "gawk (e-jerk GPU-accelerated) 1.0\n") catch {};
+            return 0;
+        } else if (std.mem.eql(u8, arg, "--traditional") or std.mem.eql(u8, arg, "-c")) {
+            options.traditional_mode = true;
+        } else if (std.mem.eql(u8, arg, "--posix") or std.mem.eql(u8, arg, "-P")) {
+            options.posix_mode = true;
+        } else if (std.mem.eql(u8, arg, "--lint")) {
+            options.lint_mode = true;
+        } else if (std.mem.eql(u8, arg, "--dump-variables")) {
+            options.dump_variables = true;
+        } else if (std.mem.eql(u8, arg, "--profile")) {
+            options.profile_mode = true;
+        } else if (std.mem.eql(u8, arg, "-W") and i + 1 < args.len) {
+            i += 1;
+            const w_arg = args[i];
+            if (std.mem.eql(u8, w_arg, "traditional")) {
+                options.traditional_mode = true;
+            } else if (std.mem.eql(u8, w_arg, "posix")) {
+                options.posix_mode = true;
+            } else if (std.mem.eql(u8, w_arg, "lint")) {
+                options.lint_mode = true;
+            } else if (std.mem.eql(u8, w_arg, "dump-variables")) {
+                options.dump_variables = true;
+            } else if (std.mem.eql(u8, w_arg, "profile")) {
+                options.profile_mode = true;
+            } else if (std.mem.eql(u8, w_arg, "version")) {
+                _ = std.posix.write(std.posix.STDOUT_FILENO, "gawk (e-jerk GPU-accelerated) 1.0\n") catch {};
+                return 0;
+            } else if (std.mem.startsWith(u8, w_arg, "dump-variables=")) {
+                options.dump_variables = true;
+            } else if (std.mem.startsWith(u8, w_arg, "profile=")) {
+                options.profile_mode = true;
+            } else {
+                std.debug.print("gawk: unknown -W option: {s}\n", .{w_arg});
+                return 2;
+            }
         } else if (std.mem.eql(u8, arg, "--verbose")) {
             verbose = true;
         } else if (std.mem.eql(u8, arg, "--backend") and i + 1 < args.len) {
@@ -70,14 +178,20 @@ pub fn main() !u8 {
             return 0;
         } else if (arg[0] != '-') {
             // First non-option is pattern/action or file
-            if (pattern.len == 0 and action.len == 0) {
+            // If program already came from -f/-e, treat all non-options as files
+            if (program_text.len > 0) {
+                try files.append(allocator, arg);
+            } else if (pattern.len == 0 and action.len == 0) {
+                if (program_text_allocated) allocator.free(program_text);
                 program_text = arg; // Save original program for full parsing
+                program_text_allocated = false;
                 // Parse AWK program: /pattern/ or /pattern/ {action} or {action}
                 const parsed = try parseAwkProgram(arg, allocator, &options);
                 pattern = parsed.pattern;
                 action = parsed.action;
-                if (parsed.is_gsub) {
+                if (parsed.is_gsub or parsed.is_sub) {
                     is_substitution = true;
+                    substitution_global = parsed.is_gsub;
                     replacement = parsed.replacement;
                 }
                 options.requested_fields = parsed.fields;
@@ -90,6 +204,24 @@ pub fn main() !u8 {
                 try files.append(allocator, arg);
             }
         }
+    }
+
+    // If program came from -f/-e and hasn't been parsed yet, parse it now
+    if (program_text.len > 0 and pattern.len == 0 and action.len == 0) {
+        const parsed = try parseAwkProgram(program_text, allocator, &options);
+        pattern = parsed.pattern;
+        action = parsed.action;
+        if (parsed.is_gsub or parsed.is_sub) {
+            is_substitution = true;
+            substitution_global = parsed.is_gsub;
+            replacement = parsed.replacement;
+        }
+        options.requested_fields = parsed.fields;
+        if (parsed.fields.len > 0) {
+            allocated_fields = parsed.fields;
+        }
+        builtin_call = parsed.builtin;
+        special_var = parsed.special_var;
     }
 
     // Read input
@@ -144,19 +276,67 @@ pub fn main() !u8 {
             _ = std.posix.write(std.posix.STDOUT_FILENO, output) catch {};
             return 0;
         } else |_| {
-            // Fall back to CPU evaluator
+            // Fall back to CPU evaluator with per-file processing
             if (verbose) std.debug.print("GPU bytecode VM unavailable, using CPU evaluator\n", .{});
-            const output = executeFullAwk(program_text, text, options.field_separator, allocator) catch |err| {
-                std.debug.print("gawk: error executing program: {}\n", .{err});
+            // Parse program once
+            var p = parser.Parser.init(program_text, allocator);
+            var program = p.parse() catch {
+                std.debug.print("gawk: parse error\n", .{});
                 return 1;
             };
-            defer allocator.free(output);
-            _ = std.posix.write(std.posix.STDOUT_FILENO, output) catch {};
+            defer program.deinit();
+            var eval = evaluator.Evaluator.init(allocator, &program.functions);
+            defer eval.deinit();
+            if (!std.mem.eql(u8, options.field_separator, " \t")) {
+                eval.field_separator = options.field_separator;
+            }
+            var var_it = variables.iterator();
+            while (var_it.next()) |entry| {
+                const val = Value.initString(entry.value_ptr.*);
+                try eval.variables.put(allocator, entry.key_ptr.*, val);
+            }
+
+            // Set up ARGC and ARGV
+            const argc_val = @as(f64, @floatFromInt(files.items.len + 1));
+            try eval.variables.put(allocator, "ARGC", Value.initNumber(argc_val));
+            var argv_array = std.StringHashMapUnmanaged(Value){};
+            try argv_array.put(allocator, "0", Value.initString("gawk"));
+            for (files.items, 0..) |path, idx| {
+                const key = try std.fmt.allocPrint(allocator, "{d}", .{idx + 1});
+                try argv_array.put(allocator, key, Value.initString(path));
+            }
+            try eval.arrays.put(allocator, "ARGV", argv_array);
+
+            if (files.items.len > 0) {
+                for (files.items, 0..) |path, file_idx| {
+                    const file_text = readFileToString(allocator, path) catch |err| {
+                        std.debug.print("gawk: {s}: {}\n", .{ path, err });
+                        continue;
+                    };
+                    defer allocator.free(file_text);
+                    const is_last = file_idx == files.items.len - 1;
+                    const output = eval.execute(&program, file_text, path, is_last) catch |err| {
+                        std.debug.print("gawk: error executing program: {}\n", .{err});
+                        return 1;
+                    };
+                    defer allocator.free(output);
+                    _ = std.posix.write(std.posix.STDOUT_FILENO, output) catch {};
+                    // Check if nextfile was requested; if so, continue to next file
+                    // (eval.execute already breaks on next_file, so we just continue)
+                }
+            } else {
+                const output = eval.execute(&program, text, null, true) catch |err| {
+                    std.debug.print("gawk: error executing program: {}\n", .{err});
+                    return 1;
+                };
+                defer allocator.free(output);
+                _ = std.posix.write(std.posix.STDOUT_FILENO, output) catch {};
+            }
             return 0;
         }
     }
 
-    // Handle substitution mode (gsub)
+    // Handle substitution mode (sub / gsub)
     if (is_substitution) {
         // Check if pattern contains regex metacharacters
         const use_regex = isRegexPattern(pattern);
@@ -165,7 +345,8 @@ pub fn main() !u8 {
             const substitutions = try cpu.findSubstitutionsRegex(text, pattern, options, allocator);
             defer allocator.free(substitutions);
 
-            const result_text = try cpu.applySubstitutionsRegex(text, substitutions, replacement, allocator);
+            const subs_to_apply = if (substitution_global) substitutions else if (substitutions.len > 0) substitutions[0..1] else substitutions;
+            const result_text = try cpu.applySubstitutionsRegex(text, subs_to_apply, replacement, allocator);
             defer allocator.free(result_text);
 
             _ = std.posix.write(std.posix.STDOUT_FILENO, result_text) catch {};
@@ -173,7 +354,8 @@ pub fn main() !u8 {
             const substitutions = try cpu.findSubstitutions(text, pattern, options, allocator);
             defer allocator.free(substitutions);
 
-            const result_text = try cpu.applySubstitutions(text, substitutions, pattern.len, replacement, allocator);
+            const subs_to_apply = if (substitution_global) substitutions else if (substitutions.len > 0) substitutions[0..1] else substitutions;
+            const result_text = try cpu.applySubstitutions(text, subs_to_apply, pattern.len, replacement, allocator);
             defer allocator.free(result_text);
 
             _ = std.posix.write(std.posix.STDOUT_FILENO, result_text) catch {};
@@ -410,7 +592,7 @@ const BuiltinCall = struct {
 /// Special variable types
 const SpecialVar = enum {
     none,
-    nr, // NR - line number
+    nr, // NR - total line number across all files
     nf, // NF - number of fields
 };
 
@@ -418,31 +600,33 @@ const ParsedProgram = struct {
     pattern: []const u8,
     action: []const u8,
     fields: []const u32,
+    builtin: ?BuiltinCall = null,
+    special_var: SpecialVar,
     is_gsub: bool,
-    replacement: []const u8,
-    builtin: ?BuiltinCall = null, // Built-in function to apply
-    special_var: SpecialVar = .none, // Special variable to print
+    is_sub: bool,
+    replacement: []const u8 = "",
+
+    pub fn init() ParsedProgram {
+        return .{
+            .pattern = "",
+            .action = "",
+            .fields = &[_]u32{},
+            .builtin = null,
+            .special_var = .none,
+            .is_gsub = false,
+            .is_sub = false,
+            .replacement = "",
+        };
+    }
 };
 
 fn parseAwkProgram(program: []const u8, allocator: std.mem.Allocator, options: *AwkOptions) !ParsedProgram {
-    var result = ParsedProgram{
-        .pattern = "",
-        .action = "",
-        .fields = &.{},
-        .is_gsub = false,
-        .replacement = "",
-    };
-
+    _ = options;
+    var result = ParsedProgram.init();
     var i: usize = 0;
 
     // Skip whitespace
     while (i < program.len and (program[i] == ' ' or program[i] == '\t')) i += 1;
-
-    // Check for inverted pattern: !/pattern/
-    if (i < program.len and program[i] == '!' and i + 1 < program.len and program[i + 1] == '/') {
-        options.invert_match = true;
-        i += 1; // Skip '!'
-    }
 
     // Check for pattern: /pattern/
     if (i < program.len and program[i] == '/') {
@@ -471,12 +655,32 @@ fn parseAwkProgram(program: []const u8, allocator: std.mem.Allocator, options: *
         // Parse action for print fields or gsub
         const action = result.action;
 
-        // Check for gsub
+        // Check for gsub or sub
         if (std.mem.indexOf(u8, action, "gsub(")) |gsub_start| {
             result.is_gsub = true;
 
             // Parse gsub(/pattern/, "replacement")
             var j = gsub_start + 5; // After "gsub("
+
+            // Skip to pattern
+            while (j < action.len and action[j] != '/') j += 1;
+            if (j < action.len) j += 1;
+            const pat_start = j;
+            while (j < action.len and action[j] != '/') j += 1;
+            result.pattern = action[pat_start..j];
+            if (j < action.len) j += 1;
+
+            // Skip to replacement
+            while (j < action.len and action[j] != '"') j += 1;
+            if (j < action.len) j += 1;
+            const repl_start = j;
+            while (j < action.len and action[j] != '"') j += 1;
+            result.replacement = action[repl_start..j];
+        } else if (std.mem.indexOf(u8, action, "sub(")) |sub_start| {
+            result.is_sub = true;
+
+            // Parse sub(/pattern/, "replacement")
+            var j = sub_start + 4; // After "sub("
 
             // Skip to pattern
             while (j < action.len and action[j] != '/') j += 1;
@@ -645,8 +849,17 @@ fn printHelp() void {
         \\
         \\Options:
         \\  -F SEP         Use SEP as field separator (default: whitespace)
+        \\  -v var=val     Assign value to variable before execution
+        \\  --assign var=val  Same as -v
+        \\  -f file        Read program from file
+        \\  -e 'program'   Inline program source
         \\  -i             Case-insensitive pattern matching     [GPU+SIMD]
-        \\  -v             Invert match (print non-matching)     [GPU+SIMD]
+        \\  --invert-match  Invert match (print non-matching)   [GPU+SIMD]
+        \\  -c, --traditional  Traditional mode (no GNU extensions)
+        \\  -P, --posix     POSIX compatibility mode
+        \\  --lint         Enable lint warnings
+        \\  --dump-variables Dump variables to file on exit
+        \\  --profile      Enable profiling
         \\  --backend MODE Backend: auto, cpu, gnu, gpu, metal, vulkan
         \\  --cpu          Force CPU backend (SIMD-optimized)
         \\  --gnu          Force GNU backend (gawk reference)
@@ -654,6 +867,7 @@ fn printHelp() void {
         \\  --metal        Force Metal backend (macOS)
         \\  --vulkan       Force Vulkan backend (macOS+gnu or Linux)
         \\  --verbose      Print backend selection and timing info
+        \\  --version      Print version information
         \\  -h, --help     Show this help
         \\
         \\Built-in Functions:                              [GPU+SIMD]
@@ -724,6 +938,18 @@ fn needsFullParser(program: []const u8) bool {
         "exit",
         "delete",
         "printf",
+        "gensub",
+        "match",
+        "asort",
+        "asorti",
+        "typeof",
+        "and",
+        "or",
+        "xor",
+        "compl",
+        "lshift",
+        "rshift",
+        "IGNORECASE",
     };
 
     for (complex_keywords) |kw| {
@@ -771,6 +997,7 @@ fn needsFullParser(program: []const u8) bool {
             if (i < program.len and program[i] == '=' and (i + 1 >= program.len or program[i + 1] != '=')) {
                 // It's an assignment - check if it's not inside gsub()
                 const before = program[0..ident_start];
+                // Exclude assignments inside gsub()/sub() which use = as regex delimiter
                 if (std.mem.indexOf(u8, before, "gsub(") == null and
                     std.mem.indexOf(u8, before, "sub(") == null)
                 {
@@ -805,7 +1032,19 @@ fn needsFullParser(program: []const u8) bool {
 }
 
 /// Execute a complex AWK program using the full parser/evaluator
-fn executeFullAwk(program_text: []const u8, input: []const u8, field_separator: []const u8, allocator: std.mem.Allocator) ![]const u8 {
+fn readFileToString(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    const file = try std.fs.cwd().openFile(path, .{});
+    defer file.close();
+    const stat = try file.stat();
+    const buf = try allocator.alloc(u8, stat.size);
+    const bytes_read = try file.readAll(buf);
+    if (bytes_read < stat.size) {
+        return buf[0..bytes_read];
+    }
+    return buf;
+}
+
+fn executeFullAwk(program_text: []const u8, input: []const u8, field_separator: []const u8, variables: std.StringHashMapUnmanaged([]const u8), allocator: std.mem.Allocator, filename: ?[]const u8) ![]const u8 {
     var p = parser.Parser.init(program_text, allocator);
     var program = p.parse() catch {
         return error.ParseError;
@@ -820,7 +1059,14 @@ fn executeFullAwk(program_text: []const u8, input: []const u8, field_separator: 
         eval.field_separator = field_separator;
     }
 
-    return eval.execute(&program, input);
+    // Set variables from -v assignments
+    var var_it = variables.iterator();
+    while (var_it.next()) |entry| {
+        const val = Value.initString(entry.value_ptr.*);
+        try eval.variables.put(allocator, entry.key_ptr.*, val);
+    }
+
+    return eval.execute(&program, input, filename, true);
 }
 
 /// Execute full AWK program on GPU using bytecode VM

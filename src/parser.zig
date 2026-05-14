@@ -41,6 +41,8 @@ pub const Token = struct {
         // Keywords
         kw_begin,
         kw_end,
+        kw_beginfile,
+        kw_endfile,
         kw_if,
         kw_else,
         kw_while,
@@ -50,6 +52,7 @@ pub const Token = struct {
         kw_break,
         kw_continue,
         kw_next,
+        kw_nextfile,
         kw_exit,
         kw_return,
         kw_delete,
@@ -357,6 +360,8 @@ pub const Tokenizer = struct {
         const keywords = std.StaticStringMap(Token.Kind).initComptime(.{
             .{ "BEGIN", .kw_begin },
             .{ "END", .kw_end },
+            .{ "BEGINFILE", .kw_beginfile },
+            .{ "ENDFILE", .kw_endfile },
             .{ "if", .kw_if },
             .{ "else", .kw_else },
             .{ "while", .kw_while },
@@ -366,6 +371,7 @@ pub const Tokenizer = struct {
             .{ "break", .kw_break },
             .{ "continue", .kw_continue },
             .{ "next", .kw_next },
+            .{ "nextfile", .kw_nextfile },
             .{ "exit", .kw_exit },
             .{ "return", .kw_return },
             .{ "delete", .kw_delete },
@@ -430,9 +436,15 @@ pub const Parser = struct {
             if (self.check(.kw_begin)) {
                 self.advance();
                 program.begin = try self.parseAction();
+            } else if (self.check(.kw_beginfile)) {
+                self.advance();
+                program.beginfile = try self.parseAction();
             } else if (self.check(.kw_end)) {
                 self.advance();
                 program.end = try self.parseAction();
+            } else if (self.check(.kw_endfile)) {
+                self.advance();
+                program.endfile = try self.parseAction();
             } else if (self.check(.kw_function)) {
                 const func = try self.parseFunction();
                 try program.functions.put(self.allocator, func.name, func);
@@ -552,11 +564,19 @@ pub const Parser = struct {
             stmt.* = .{ .kind = .next_stmt };
             return stmt;
         }
+        if (self.check(.kw_nextfile)) {
+            self.advance();
+            self.consumeStatementEnd();
+            const stmt = try self.allocator.create(ast.Statement);
+            stmt.* = .{ .kind = .nextfile_stmt };
+            return stmt;
+        }
         if (self.check(.kw_exit)) return self.parseExit();
         if (self.check(.kw_return)) return self.parseReturn();
         if (self.check(.kw_delete)) return self.parseDelete();
         if (self.check(.kw_print)) return self.parsePrint();
         if (self.check(.kw_printf)) return self.parsePrintf();
+        if (self.check(.kw_getline)) return self.parseGetline();
         if (self.check(.lbrace)) return self.parseAction();
 
         // Expression statement
@@ -631,6 +651,8 @@ pub const Parser = struct {
         // Check for for-in loop
         if (self.check(.identifier)) {
             const saved_pos = self.tokenizer.pos;
+            const saved_current = self.current;
+            const saved_previous = self.previous;
             const var_name = self.current.lexeme;
             self.advance();
 
@@ -653,7 +675,8 @@ pub const Parser = struct {
 
             // Not a for-in, reset
             self.tokenizer.pos = saved_pos;
-            self.advance();
+            self.current = saved_current;
+            self.previous = saved_previous;
         }
 
         // Regular for loop: for (init; cond; update)
@@ -735,6 +758,55 @@ pub const Parser = struct {
         return stmt;
     }
 
+    fn parsePrintExpression(self: *Parser) ParseError!*ast.Expression {
+        // Parse a print/printf argument, stopping at redirection operators
+        var expr = try self.parseConcatenation();
+
+        while (true) {
+            if (self.check(.gt) or self.check(.append) or self.check(.pipe) or
+                self.check(.comma) or self.checkStatementEnd())
+            {
+                break;
+            }
+
+            if (self.match(.question)) {
+                const true_expr = try self.parseExpression();
+                try self.consume(.colon, "Expected ':' in ternary expression");
+                const false_expr = try self.parseTernary();
+
+                const result = try self.allocator.create(ast.Expression);
+                result.* = .{ .kind = .{ .ternary = .{
+                    .condition = expr,
+                    .true_expr = true_expr,
+                    .false_expr = false_expr,
+                } } };
+                expr = result;
+            } else if (self.match(.pipepipe)) {
+                const right = try self.parseConcatenation();
+                expr = try ast.Expression.binaryOp(self.allocator, .@"or", expr, right);
+            } else if (self.match(.ampamp)) {
+                const right = try self.parseConcatenation();
+                expr = try ast.Expression.binaryOp(self.allocator, .@"and", expr, right);
+            } else if (self.check(.match) or self.check(.not_match)) {
+                const negated = self.current.kind == .not_match;
+                self.advance();
+                const pattern = try self.parseConcatenation();
+
+                const result = try self.allocator.create(ast.Expression);
+                result.* = .{ .kind = .{ .regex_match = .{
+                    .string = expr,
+                    .pattern = pattern,
+                    .negated = negated,
+                } } };
+                expr = result;
+            } else {
+                break;
+            }
+        }
+
+        return expr;
+    }
+
     fn parsePrint(self: *Parser) ParseError!*ast.Statement {
         self.advance(); // consume 'print'
 
@@ -744,7 +816,7 @@ pub const Parser = struct {
         // Parse print arguments
         if (!self.checkStatementEnd() and !self.check(.gt) and !self.check(.append) and !self.check(.pipe)) {
             while (true) {
-                const arg = try self.parseExpression();
+                const arg = try self.parsePrintExpression();
                 try args.append(self.allocator, arg);
                 if (!self.match(.comma)) break;
             }
@@ -752,6 +824,7 @@ pub const Parser = struct {
 
         var output_file: ?*ast.Expression = null;
         var append = false;
+        var pipe_cmd: ?*ast.Expression = null;
 
         // Check for output redirection
         if (self.match(.gt)) {
@@ -759,6 +832,8 @@ pub const Parser = struct {
         } else if (self.match(.append)) {
             output_file = try self.parseExpression();
             append = true;
+        } else if (self.match(.pipe)) {
+            pipe_cmd = try self.parseExpression();
         }
 
         self.consumeStatementEnd();
@@ -768,6 +843,7 @@ pub const Parser = struct {
             .args = try args.toOwnedSlice(self.allocator),
             .output_file = output_file,
             .append = append,
+            .pipe_cmd = pipe_cmd,
         } } };
         return stmt;
     }
@@ -775,24 +851,27 @@ pub const Parser = struct {
     fn parsePrintf(self: *Parser) ParseError!*ast.Statement {
         self.advance(); // consume 'printf'
 
-        const format = try self.parseExpression();
+        const format = try self.parsePrintExpression();
 
         var args = std.ArrayListUnmanaged(*ast.Expression){};
         defer args.deinit(self.allocator);
 
         while (self.match(.comma)) {
-            const arg = try self.parseExpression();
+            const arg = try self.parsePrintExpression();
             try args.append(self.allocator, arg);
         }
 
         var output_file: ?*ast.Expression = null;
         var append = false;
+        var pipe_cmd: ?*ast.Expression = null;
 
         if (self.match(.gt)) {
             output_file = try self.parseExpression();
         } else if (self.match(.append)) {
             output_file = try self.parseExpression();
             append = true;
+        } else if (self.match(.pipe)) {
+            pipe_cmd = try self.parseExpression();
         }
 
         self.consumeStatementEnd();
@@ -803,6 +882,34 @@ pub const Parser = struct {
             .args = try args.toOwnedSlice(self.allocator),
             .output_file = output_file,
             .append = append,
+            .pipe_cmd = pipe_cmd,
+        } } };
+        return stmt;
+    }
+
+    fn parseGetline(self: *Parser) ParseError!*ast.Statement {
+        self.advance(); // consume 'getline'
+
+        var var_name: ?[]const u8 = null;
+        var file_expr: ?*ast.Expression = null;
+
+        // Optional variable name
+        if (self.check(.identifier)) {
+            var_name = self.current.lexeme;
+            self.advance();
+        }
+
+        // Check for < file
+        if (self.match(.lt)) {
+            file_expr = try self.parseExpression();
+        }
+
+        self.consumeStatementEnd();
+
+        const stmt = try self.allocator.create(ast.Statement);
+        stmt.* = .{ .kind = .{ .getline_stmt = .{
+            .var_name = var_name,
+            .file = file_expr,
         } } };
         return stmt;
     }
@@ -1149,6 +1256,34 @@ pub const Parser = struct {
             } else {
                 return ParseError.UnexpectedToken;
             }
+        }
+
+        // getline expression
+        if (self.match(.kw_getline)) {
+            var var_name: ?[]const u8 = null;
+            var file_expr: ?*ast.Expression = null;
+            var pipe_expr: ?*ast.Expression = null;
+
+            // Optional variable name
+            if (self.check(.identifier)) {
+                var_name = self.current.lexeme;
+                self.advance();
+            }
+
+            // Check for < file or | command
+            if (self.match(.lt)) {
+                file_expr = try self.parseExpression();
+            } else if (self.match(.pipe)) {
+                pipe_expr = try self.parseExpression();
+            }
+
+            const result = try self.allocator.create(ast.Expression);
+            result.* = .{ .kind = .{ .getline = .{
+                .var_name = var_name,
+                .file = file_expr,
+                .pipe_cmd = pipe_expr,
+            } } };
+            return result;
         }
 
         // Identifier (variable or function call)

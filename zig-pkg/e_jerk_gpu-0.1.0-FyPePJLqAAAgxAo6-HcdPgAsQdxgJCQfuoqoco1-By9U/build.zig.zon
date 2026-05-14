@@ -1,0 +1,15 @@
+.{
+    .fingerprint = 0x98a422563cde2317,
+    .name = .e_jerk_gpu,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.15.2",
+
+    .dependencies = .{},
+
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "libs",
+    },
+}
