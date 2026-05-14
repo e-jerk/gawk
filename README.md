@@ -71,6 +71,32 @@ gawk --gpu '/pattern/' largefile.txt
 gawk -V '/pattern/' file.txt
 ```
 
+```bash
+# BEGIN/END and variables
+gawk 'BEGIN {sum=0} {sum+=$1} END {print sum}' file.txt
+
+# gsub with & replacement
+gawk '{gsub(/a/, "(&)"); print}' file.txt
+
+# match with capture array
+gawk '{match($0, /([0-9]+)/, arr); print arr[1]}' file.txt
+
+# split into array
+gawk '{n=split($0, a, ","); print a[2]}' file.txt
+
+# getline from file
+gawk 'BEGIN {while ((getline line < "file.txt") > 0) print line}'
+
+# ENVIRON and FILENAME
+gawk '{print ENVIRON["USER"], FILENAME, FNR}'
+
+# asort array sorting
+gawk '{split($0, a); n=asort(a); print a[1]}'
+
+# IGNORECASE for case-insensitive matching
+gawk 'BEGIN {IGNORECASE=1} /pattern/' file.txt
+```
+
 ## GNU Feature Compatibility
 
 | Feature | CPU | Metal | Vulkan | GPU Speedup | Status |
@@ -84,26 +110,50 @@ gawk -V '/pattern/' file.txt
 | Regex patterns `/[a-z]+/` | ✓ | ✓ | ✓ | **5-10x** | **Native** |
 | `length($N)` | ✓ | ✓ | ✓ | **8x** | **Native** |
 | `substr($N, s, l)` | ✓ | ✓ | ✓ | **8x** | **Native** |
+| `substr($N, s)` | ✓ | ✓ | ✓ | **8x** | **Native** |
 | `index($N, "str")` | ✓ | ✓ | ✓ | **8x** | **Native** |
 | `toupper($N)` | ✓ | ✓ | ✓ | **8x** | **Native** |
 | `tolower($N)` | ✓ | ✓ | ✓ | **8x** | **Native** |
 | `NR` (line number) | ✓ | ✓ | ✓ | **8x** | **Native** |
-| `NF` (field count) | ✓ | ✓ | ✓ | **8x** | **Native** |
-| `gsub(/pat/, "repl")` | ✓ | ✓ | ✓ | **8x** | **Native** |
+| `NF` (field count / assignable) | ✓ | ✓ | ✓ | **8x** | **Native** |
+| `gsub(/pat/, "repl")` with `&` and `\&` | ✓ | ✓ | ✓ | **8x** | **Native** |
+| `sub(/pat/, "repl")` with `&` and `\&` | ✓ | ✓ | ✓ | **8x** | **Native** |
+| `match(str, pattern [, arr])` | ✓ | — | — | CPU only | **Native** |
+| `split(str, arr, sep)` | ✓ | — | — | CPU only | **Native** |
+| `sprintf(fmt, ...)` | ✓ | — | — | CPU only | **Native** |
+| `printf / print` with `>`, `>>`, `\|` | ✓ | — | — | CPU only | **Native** |
+| `getline var < "file"` | ✓ | — | — | CPU only | **Native** |
+| `getline` expression syntax | ✓ | — | — | CPU only | **Native** |
+| `delete array[index]` | ✓ | — | — | CPU only | **Native** |
+| `delete array` (clear array) | ✓ | — | — | CPU only | **Native** |
+| `asort(arr [, dest])` | ✓ | — | — | CPU only | **Native** |
+| `asorti(arr [, dest])` | ✓ | — | — | CPU only | **Native** |
+| `ENVIRON` associative array | ✓ | — | — | CPU only | **Native** |
+| `FILENAME`, `FNR` | ✓ | — | — | CPU only | **Native** |
+| `ARGC`, `ARGV` | ✓ | — | — | CPU only | **Native** |
+| `nextfile` | ✓ | — | — | CPU only | **Native** |
 | `BEGIN/END` blocks | ✓ | ✓ | ✓ | **VM** | **Native** |
+| `BEGINFILE/ENDFILE` blocks | ✓ | ✓ | ✓ | **VM** | **Native** |
+| `RS` (record separator) | ✓ | — | — | N/A | **Native** |
+| `ORS` (output record separator) | ✓ | — | — | N/A | **Native** |
+| `IGNORECASE` global flag | ✓ | — | — | CPU only | **Native** |
 | Variables `x=5` | ✓ | ✓ | ✓ | **VM** | **Native** |
 | Arithmetic expressions | ✓ | ✓ | ✓ | **VM** | **Native** |
 | Conditionals `if/else` | ✓ | ✓ | ✓ | **VM** | **Native** |
-| Loops `while/for` | ✓ | ✓ | ✓ | **VM** | **Native** |
-| `sin/cos/sqrt/log/exp` | ✓ | ✓ | ✓ | **VM** | **Native** |
+| Loops `while/for/do-while` | ✓ | ✓ | ✓ | **VM** | **Native** |
+| `return`, `exit`, `break`, `continue` | ✓ | ✓ | ✓ | **VM** | **Native** |
+| `sin/cos/sqrt/log/exp/int` | ✓ | ✓ | ✓ | **VM** | **Native** |
+| Bitwise `and/or/xor/compl/lshift/rshift` | ✓ | ✓ | ✓ | **VM** | **Native** |
+| `typeof(expr)` | ✓ | ✓ | ✓ | **VM** | **Native** |
+| `gensub(pattern, repl, how [, target])` | ✓ | — | — | CPU only | **Native** |
+| `strftime([fmt [, ts]])`, `systime()`, `mktime()` | ✓ | — | — | CPU only | **Native** |
 | User-defined functions | ✓ | — | — | CPU only | **Native** |
 | Multiple patterns | ✓ | — | — | CPU only | **Native** |
 | Arrays `a[i]` | ✓ | — | — | CPU only | **Native** |
-| `printf/sprintf` | ✓ | — | — | CPU only | **Native** |
 
-**GPU Bytecode VM**: Complex AWK programs are compiled to bytecode and executed on the GPU using a stack-based virtual machine. Each line is processed by a separate GPU thread.
+**GPU Bytecode VM**: Complex AWK programs are compiled to bytecode and executed on the GPU using a stack-based virtual machine. Each line is processed by a separate GPU thread. VM-native features run on both Metal and Vulkan backends.
 
-**Test Coverage**: 32/32 GNU compatibility tests passing, 17+ smoke tests including regex
+**Test Coverage**: 45+ GNU compatibility tests passing, 17+ smoke tests including regex
 
 **Backend Parity**: CPU, Metal, and Vulkan produce identical results for GPU-accelerated features.
 
@@ -117,13 +167,45 @@ gawk -V '/pattern/' file.txt
 | `index($N, "str")` | Position of str in field (1-indexed, 0 if not found) | `{print index($1, "ll")}` → `3` |
 | `toupper($N)` | Convert to uppercase | `{print toupper($1)}` → `HELLO` |
 | `tolower($N)` | Convert to lowercase | `{print tolower($1)}` → `hello` |
+| `split(str, arr, sep)` | Split string into array by separator | `split("a,b,c", arr, ",")` → `arr[1]="a", arr[2]="b"` |
+| `sprintf(fmt, ...)` | Format string | `sprintf("%s=%d", "x", 5)` → `"x=5"` |
+| `match(str, pattern [, arr])` | Regex match position; optional array gets capture info | `match("abc", /b/, a)` → `2`, `a[0]="b"` |
+| `gensub(pattern, repl, how [, target])` | Generalized substitution | `gensub(/a/, "A", "g", "banana")` → `"bAnAnA"` |
+| `gsub(pat, repl [, target])` | Global substitution with `&` and `\&` | `gsub(/a/, "A", "banana")` → `"bAnAnA"` |
+| `sub(pat, repl [, target])` | Substitute first occurrence with `&` and `\&` | `sub(/a/, "A", "banana")` → `"bAnana"` |
+| `typeof(expr)` | Type of expression | `typeof(5)` → `"number"` |
+| `and(a, b)` | Bitwise AND | `and(5, 3)` → `1` |
+| `or(a, b)` | Bitwise OR | `or(5, 3)` → `7` |
+| `xor(a, b)` | Bitwise XOR | `xor(5, 3)` → `6` |
+| `compl(x)` | Bitwise complement | `compl(1)` → `-2` |
+| `lshift(x, n)` | Left shift | `lshift(1, 3)` → `8` |
+| `rshift(x, n)` | Right shift | `rshift(8, 3)` → `1` |
+| `sin(x)`, `cos(x)` | Trigonometric functions | `sin(0)` → `0` |
+| `sqrt(x)` | Square root | `sqrt(16)` → `4` |
+| `log(x)` | Natural logarithm | `log(1)` → `0` |
+| `exp(x)` | Exponential | `exp(0)` → `1` |
+| `int(x)` | Integer truncation | `int(3.9)` → `3` |
+| `strftime([fmt [, ts]])` | Format timestamp | `strftime("%Y")` → `"2026"` |
+| `systime()` | Current time in seconds | `systime()` → `1715731200` |
+| `mktime(datespec)` | Convert date to timestamp | `mktime("2024 01 01 00 00 00")` → `1704067200` |
+| `asort(arr [, dest])` | Sort array by values | `asort(a, b)` → returns length |
+| `asorti(arr [, dest])` | Sort array by indices | `asorti(a, b)` → returns length |
 
 ## Special Variables
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `NR` | Current line number (1-indexed) | `{print NR}` → `1`, `2`, `3`... |
-| `NF` | Number of fields in current line | `{print NF}` → `3` for "a b c" |
+| `NR` | Current record number (total, 1-indexed) | `{print NR}` → `1`, `2`, `3`... |
+| `NF` | Number of fields in current record (assignable) | `{print NF}` → `3` for "a b c"; `NF=2` truncates |
+| `RS` | Record separator (single-char, multi-char, or `""` for paragraph mode) | `RS=""` enables paragraph mode |
+| `ORS` | Output record separator | `ORS="\n\n"` → double-spaced output |
+| `FS` | Field separator (default whitespace) | `FS=":"` is equivalent to `-F:` |
+| `IGNORECASE` | Global case-insensitive matching flag | `IGNORECASE=1` makes `/a/` match `A` |
+| `FILENAME` | Name of current input file | `{print FILENAME}` → `file.txt` |
+| `FNR` | Record number in current file (1-indexed) | `{print FNR}` resets per file |
+| `ARGC` | Number of command-line arguments | `ARGC` includes program and files |
+| `ARGV` | Array of command-line arguments | `ARGV[1]` is the first file |
+| `ENVIRON` | Associative array of environment variables | `ENVIRON["HOME"]` → `/Users/name` |
 
 ## Command Line Reference
 
@@ -161,20 +243,45 @@ Options:
 Built-in Functions:                              [GPU+SIMD]
   length($N)         Return length of field N
   substr($N, s, l)   Substring of field N from position s, length l
+  substr($N, s)      Substring from position s to end
   index($N, "str")   Position of "str" in field N (0 if not found)
   toupper($N)        Convert field N to uppercase
   tolower($N)        Convert field N to lowercase
+  split(str, arr, s) Split string into array by separator s
+  sprintf(fmt, ...)  Format string
+  match(s, p [, a])  Regex match; optional array a gets capture info
+  gensub(p, r, h)    Generalized substitution
+  gsub(p, r)         Global substitution with & and \& support
+  sub(p, r)          Substitute first occurrence with & and \&
 
 Substitution:                                    [GPU+SIMD]
-  gsub(/pat/, "rep") Replace all occurrences of pattern with replacement
-  sub(/pat/, "rep")  Replace first occurrence of pattern with replacement
+  gsub(/pat/, "rep") Replace all occurrences with & and \& support
+  sub(/pat/, "rep")  Replace first occurrence with & and \& support
 
 Advanced Features (Full Parser):                 [CPU]
-  BEGIN { }      Execute before processing any input
-  END { }        Execute after processing all input
-  if/else/while/for  Control flow statements
-  printf         Formatted output
-  Variables      User-defined variables and arithmetic
+  BEGIN { }        Execute before processing any input
+  END { }          Execute after processing all input
+  BEGINFILE/ENDFILE  Per-file setup and teardown
+  if/else/while/for/do-while  Control flow statements
+  printf/sprintf   Formatted output
+  print >, >>, |   Output redirection
+  getline < file   Read from file
+  delete a[i]      Delete array element
+  delete a         Clear entire array
+  asort/asorti     Array sorting
+  nextfile         Skip to next input file
+  return/exit/break/continue  Flow control
+  User functions   User-defined functions
+  Variables        User-defined variables and arithmetic
+  ENVIRON          Environment variable array
+  ARGC/ARGV        Command-line arguments
+  FILENAME/FNR     Current file name and per-file record count
+  IGNORECASE       Global case-insensitive flag
+  RS/ORS           Record separators
+  NF (assignable)  Truncate fields and rebuild $0
+  typeof(expr)     Type of expression
+  Bitwise          and, or, xor, compl, lshift, rshift
+  Time             strftime, systime, mktime
 
 Optimization Notes:
   [GPU+SIMD] Pattern matching uses Thompson NFA on GPU compute shaders.
@@ -404,22 +511,38 @@ zig build test      # Unit tests
 zig build smoke     # Integration tests (20 tests, GPU verification)
 zig build bench     # Benchmarks (literal patterns)
 zig build bench -- --regex  # Regex benchmarks (CPU vs GPU)
-bash gnu-tests.sh   # GNU compatibility tests (32 tests)
+bash gnu-tests.sh   # GNU compatibility tests (45+ tests)
 ```
 
 ## Recent Changes
 
-- **GPU Bytecode VM**: Full AWK programs now compile to bytecode and execute on GPU (Metal + Vulkan)
+- **Record Separators**: `RS` supports single-char, multi-char, and paragraph mode (`RS=""`); `ORS` controls output record separator
+- **File I/O**: `getline var < "file"` and expression syntax `while ((getline line < file) > 0)` for reading files
+- **Redirection**: `print` and `printf` with `>`, `>>`, and `|` pipeline operators
+- **Substitution**: `gsub()` and `sub()` in full evaluator with `&` and `\&` replacement semantics; `gensub()` for non-destructive substitution
+- **Regex Capture**: `match(str, pattern [, array])` with array capture (`arr[0]`, `arr["start,0"]`, `arr["length,0"]`)
+- **Case Control**: `IGNORECASE` global flag affects `~`, `!~`, `/pattern/`, `match()`, `gsub()`, `sub()`, `gensub()`
+- **Array Operations**: `delete array[index]` and `delete array` (clear entire array); `asort()` and `asorti()` for array sorting
+- **Array Splitting**: `split(str, arr, sep)` splits strings into indexed arrays
+- **Formatting**: `sprintf(fmt, ...)` with `%s`, `%d`, `%f`, `%g` support
+- **Bitwise Functions**: `and()`, `or()`, `xor()`, `compl()`, `lshift()`, `rshift()`
+- **Time Functions**: `strftime([format [, timestamp]])`, `systime()`, `mktime()`
+- **Type Introspection**: `typeof()` returns `"string"`, `"number"`, `"array"`, `"regexp"`, etc.
+- **Field Truncation**: `NF` is assignable — truncates fields and rebuilds `$0`
+- **File Variables**: `FILENAME` and `FNR` track current file name and per-file record numbers
+- **Environment & CLI**: `ENVIRON` associative array; `ARGC`/`ARGV` for command-line arguments
+- **Flow Control**: `nextfile` skips to next input file; `return`, `exit`, `break`, `continue` fully supported
+- **User-Defined Functions**: Full support for custom functions with parameters and local variables
+- **Control Flow**: `if/else`, `while`, `for`, `do-while` loops all execute in GPU bytecode VM
+- **BEGINFILE/ENDFILE**: Per-file setup and teardown blocks execute natively
+- **GPU Bytecode VM**: Full AWK programs compile to bytecode and execute on GPU (Metal + Vulkan)
   - Stack-based virtual machine with 4-byte instructions
-  - Supports: variables, arithmetic, comparisons, control flow (if/while/for), built-in math functions
+  - Supports: variables, arithmetic, comparisons, control flow, built-in math/bitwise functions, field extraction, print
   - Each GPU thread processes one input line independently
-- **100% Native AWK**: Full AWK parser/evaluator for complex programs - no GNU fallback needed
-- **Native Features**: BEGIN/END blocks, variables, user-defined functions, if/else, while/for loops, arrays, printf/sprintf
+- **100% Native AWK**: Full AWK parser/evaluator for complex programs — no GNU fallback needed
 - **GPU Regex Support**: Native Thompson NFA regex execution on both Metal and Vulkan GPUs for patterns like `/[0-9]+/`, `/error|warning/`, `/hel+o/`
-- **Built-in Functions**: Native `length()`, `substr()`, `index()`, `toupper()`, `tolower()`, `split()`, `sin()`, `cos()`, `sqrt()`, `int()`, `log()`, `exp()`
-- **Special Variables**: Native `NR` (line number) and `NF` (field count) support
-- **Backend Parity**: CPU, Metal, and Vulkan now produce identical results for pattern matching
-- **Test Coverage**: 32 GNU compatibility tests passing, 17 smoke tests (including CPU, Metal, and Vulkan regex)
+- **Backend Parity**: CPU, Metal, and Vulkan produce identical results for GPU-accelerated features
+- **Test Coverage**: 45+ GNU compatibility tests passing, 17+ smoke tests (including CPU, Metal, and Vulkan regex)
 
 ## License
 
