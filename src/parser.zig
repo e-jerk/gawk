@@ -50,6 +50,7 @@ pub const Token = struct {
         kw_break,
         kw_continue,
         kw_next,
+        kw_nextfile,
         kw_exit,
         kw_return,
         kw_delete,
@@ -366,6 +367,7 @@ pub const Tokenizer = struct {
             .{ "break", .kw_break },
             .{ "continue", .kw_continue },
             .{ "next", .kw_next },
+            .{ "nextfile", .kw_nextfile },
             .{ "exit", .kw_exit },
             .{ "return", .kw_return },
             .{ "delete", .kw_delete },
@@ -550,6 +552,13 @@ pub const Parser = struct {
             self.consumeStatementEnd();
             const stmt = try self.allocator.create(ast.Statement);
             stmt.* = .{ .kind = .next_stmt };
+            return stmt;
+        }
+        if (self.check(.kw_nextfile)) {
+            self.advance();
+            self.consumeStatementEnd();
+            const stmt = try self.allocator.create(ast.Statement);
+            stmt.* = .{ .kind = .nextfile_stmt };
             return stmt;
         }
         if (self.check(.kw_exit)) return self.parseExit();

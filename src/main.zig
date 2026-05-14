@@ -295,6 +295,18 @@ pub fn main() !u8 {
                 const val = Value.initString(entry.value_ptr.*);
                 try eval.variables.put(allocator, entry.key_ptr.*, val);
             }
+
+            // Set up ARGC and ARGV
+            const argc_val = @as(f64, @floatFromInt(files.items.len + 1));
+            try eval.variables.put(allocator, "ARGC", Value.initNumber(argc_val));
+            var argv_array = std.StringHashMapUnmanaged(Value){};
+            try argv_array.put(allocator, "0", Value.initString("gawk"));
+            for (files.items, 0..) |path, idx| {
+                const key = try std.fmt.allocPrint(allocator, "{d}", .{idx + 1});
+                try argv_array.put(allocator, key, Value.initString(path));
+            }
+            try eval.arrays.put(allocator, "ARGV", argv_array);
+
             if (files.items.len > 0) {
                 for (files.items, 0..) |path, file_idx| {
                     const file_text = readFileToString(allocator, path) catch |err| {
@@ -309,6 +321,8 @@ pub fn main() !u8 {
                     };
                     defer allocator.free(output);
                     _ = std.posix.write(std.posix.STDOUT_FILENO, output) catch {};
+                    // Check if nextfile was requested; if so, continue to next file
+                    // (eval.execute already breaks on next_file, so we just continue)
                 }
             } else {
                 const output = eval.execute(&program, text, null, true) catch |err| {

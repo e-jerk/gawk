@@ -383,6 +383,9 @@ pub const Statement = struct {
         /// Next statement (skip to next input line)
         next_stmt: void,
 
+        /// Nextfile statement (skip to next input file)
+        nextfile_stmt: void,
+
         /// Exit statement: exit [expr]
         exit_stmt: ?*Expression,
 
@@ -508,7 +511,7 @@ pub const Statement = struct {
                     allocator.destroy(f);
                 }
             },
-            .break_stmt, .continue_stmt, .next_stmt, .empty => {},
+            .break_stmt, .continue_stmt, .next_stmt, .nextfile_stmt, .empty => {},
         }
     }
 

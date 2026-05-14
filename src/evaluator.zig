@@ -29,6 +29,7 @@ const ControlFlow = enum {
     break_loop,
     continue_loop,
     next_line,
+    next_file,
     exit_program,
     return_value,
 };
@@ -163,6 +164,9 @@ pub const Evaluator = struct {
     /// If filename is provided, sets FILENAME and resets FNR (for multi-file processing)
     /// run_end controls whether END block executes (set to false for intermediate files in multi-file mode)
     pub fn execute(self: *Evaluator, program: *ast.Program, input: []const u8, maybe_filename: ?[]const u8, run_end: bool) ![]const u8 {
+        // Reset control state at start of each file
+        self.control = .normal;
+
         // Set filename if provided
         if (maybe_filename) |fname| {
             self.filename = fname;
@@ -204,10 +208,10 @@ pub const Evaluator = struct {
                     try self.executeStatement(rule.action);
                 }
 
-                if (self.control == .exit_program) break;
+                if (self.control == .exit_program or self.control == .next_file) break;
             }
 
-            if (self.control == .exit_program) break;
+            if (self.control == .exit_program or self.control == .next_file) break;
         }
 
         // Execute END block (only on last file or single file)
@@ -415,6 +419,10 @@ pub const Evaluator = struct {
 
             .next_stmt => {
                 self.control = .next_line;
+            },
+
+            .nextfile_stmt => {
+                self.control = .next_file;
             },
 
             .exit_stmt => |exit_expr| {
@@ -901,6 +909,10 @@ pub const Evaluator = struct {
         try result.value_ptr.put(self.allocator, key, value);
     }
 
+    fn isLeapYear(year: i64) bool {
+        return @mod(year, 4) == 0 and (@mod(year, 100) != 0 or @mod(year, 400) == 0);
+    }
+
     fn callFunction(self: *Evaluator, name: []const u8, args: []*ast.Expression) !Value {
         // Built-in functions
         if (std.mem.eql(u8, name, "length")) {
@@ -1114,6 +1126,139 @@ pub const Evaluator = struct {
             if (args.len == 0) return Value.initNumber(1.0);
             const val = try self.evaluateExpression(args[0]);
             return Value.initNumber(@exp(val.asNumber()));
+        }
+
+        if (std.mem.eql(u8, name, "systime")) {
+            const now = std.time.timestamp();
+            return Value.initNumber(@floatFromInt(now));
+        }
+
+        if (std.mem.eql(u8, name, "strftime")) {
+            // strftime([format [, timestamp]])
+            var format_str: []const u8 = "%Y-%m-%d %H:%M:%S";
+            var timestamp: i64 = std.time.timestamp();
+            if (args.len > 0) {
+                const fmt_val = try self.evaluateExpression(args[0]);
+                format_str = try fmt_val.asString(self.allocator);
+            }
+            if (args.len > 1) {
+                const time_val = try self.evaluateExpression(args[1]);
+                timestamp = @intFromFloat(time_val.asNumber());
+            }
+
+            const epoch = std.time.epoch.EpochSeconds{ .secs = @intCast(timestamp) };
+            const epoch_day = epoch.getEpochDay();
+            const year_day = epoch_day.calculateYearDay();
+            const month_day = year_day.calculateMonthDay();
+            const day_secs = epoch.getDaySeconds();
+
+            var result: std.ArrayListUnmanaged(u8) = .{};
+            errdefer result.deinit(self.allocator);
+
+            var i: usize = 0;
+            while (i < format_str.len) : (i += 1) {
+                if (format_str[i] == '%' and i + 1 < format_str.len) {
+                    i += 1;
+                    switch (format_str[i]) {
+                        '%' => try result.append(self.allocator, '%'),
+                        'Y' => {
+                            const str = try std.fmt.allocPrint(self.allocator, "{d}", .{year_day.year});
+                            defer self.allocator.free(str);
+                            try result.appendSlice(self.allocator, str);
+                        },
+                        'y' => {
+                            const short_year = @mod(year_day.year, 100);
+                            const str = try std.fmt.allocPrint(self.allocator, "{d:0>2}", .{short_year});
+                            defer self.allocator.free(str);
+                            try result.appendSlice(self.allocator, str);
+                        },
+                        'm' => {
+                            const str = try std.fmt.allocPrint(self.allocator, "{d:0>2}", .{month_day.month});
+                            defer self.allocator.free(str);
+                            try result.appendSlice(self.allocator, str);
+                        },
+                        'd' => {
+                            const str = try std.fmt.allocPrint(self.allocator, "{d:0>2}", .{month_day.day_index + 1});
+                            defer self.allocator.free(str);
+                            try result.appendSlice(self.allocator, str);
+                        },
+                        'H' => {
+                            const str = try std.fmt.allocPrint(self.allocator, "{d:0>2}", .{day_secs.getHoursIntoDay()});
+                            defer self.allocator.free(str);
+                            try result.appendSlice(self.allocator, str);
+                        },
+                        'M' => {
+                            const str = try std.fmt.allocPrint(self.allocator, "{d:0>2}", .{day_secs.getMinutesIntoHour()});
+                            defer self.allocator.free(str);
+                            try result.appendSlice(self.allocator, str);
+                        },
+                        'S' => {
+                            const str = try std.fmt.allocPrint(self.allocator, "{d:0>2}", .{day_secs.getSecondsIntoMinute()});
+                            defer self.allocator.free(str);
+                            try result.appendSlice(self.allocator, str);
+                        },
+                        's' => {
+                            const str = try std.fmt.allocPrint(self.allocator, "{d}", .{timestamp});
+                            defer self.allocator.free(str);
+                            try result.appendSlice(self.allocator, str);
+                        },
+                        else => {
+                            try result.append(self.allocator, '%');
+                            try result.append(self.allocator, format_str[i]);
+                        },
+                    }
+                } else {
+                    try result.append(self.allocator, format_str[i]);
+                }
+            }
+
+            const output = try result.toOwnedSlice(self.allocator);
+            return Value.initStringOwned(output, self.allocator);
+        }
+
+        if (std.mem.eql(u8, name, "mktime")) {
+            // mktime("YYYY MM DD HH MM SS [DST]") -> timestamp
+            if (args.len == 0) return Value.initNumber(-1.0);
+            const val = try self.evaluateExpression(args[0]);
+            const datespec = try val.asString(self.allocator);
+            // Parse "YYYY MM DD HH MM SS"
+            var parts: [6]i64 = undefined;
+            var part_idx: usize = 0;
+            var iter = std.mem.splitScalar(u8, datespec, ' ');
+            while (iter.next()) |part| {
+                if (part_idx < 6) {
+                    parts[part_idx] = std.fmt.parseInt(i64, part, 10) catch 0;
+                    part_idx += 1;
+                }
+            }
+            if (part_idx < 6) return Value.initNumber(-1.0);
+
+            // Convert to epoch seconds (simplified: assumes UTC)
+            const year = parts[0];
+            const month = parts[1];
+            const day = parts[2];
+            const hour = parts[3];
+            const minute = parts[4];
+            const second = parts[5];
+
+            // Days from 1970 to year-01-01
+            var days: i64 = 0;
+            var y: i64 = 1970;
+            while (y < year) : (y += 1) {
+                days += if (isLeapYear(y)) 366 else 365;
+            }
+            // Days from year-01-01 to year-month-01
+            const month_days = [_]i64{ 0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+            var m: i64 = 1;
+            while (m < month) : (m += 1) {
+                days += month_days[@intCast(m)];
+                if (m == 2 and isLeapYear(year)) days += 1;
+            }
+            // Days in month
+            days += day - 1;
+
+            const timestamp = days * std.time.s_per_day + hour * std.time.s_per_hour + minute * std.time.s_per_min + second;
+            return Value.initNumber(@floatFromInt(timestamp));
         }
 
         // User-defined function
