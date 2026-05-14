@@ -177,7 +177,10 @@ pub fn main() !u8 {
             return 0;
         } else if (arg[0] != '-') {
             // First non-option is pattern/action or file
-            if (pattern.len == 0 and action.len == 0) {
+            // If program already came from -f/-e, treat all non-options as files
+            if (program_text.len > 0) {
+                try files.append(allocator, arg);
+            } else if (pattern.len == 0 and action.len == 0) {
                 if (program_text_allocated) allocator.free(program_text);
                 program_text = arg; // Save original program for full parsing
                 program_text_allocated = false;
