@@ -328,6 +328,7 @@ pub const Statement = struct {
             args: []*Expression,
             output_file: ?*Expression,
             append: bool, // >> vs >
+            pipe_cmd: ?*Expression,
         },
 
         /// Printf statement: printf "format", args...
@@ -336,6 +337,7 @@ pub const Statement = struct {
             args: []*Expression,
             output_file: ?*Expression,
             append: bool,
+            pipe_cmd: ?*Expression,
         },
 
         /// If statement: if (cond) stmt [else stmt]
@@ -527,7 +529,7 @@ pub const Statement = struct {
     /// Create a print statement
     pub fn print(allocator: Allocator, args: []*Expression) !*Statement {
         const stmt = try allocator.create(Statement);
-        stmt.* = .{ .kind = .{ .print = .{ .args = args, .output_file = null, .append = false } } };
+        stmt.* = .{ .kind = .{ .print = .{ .args = args, .output_file = null, .append = false, .pipe_cmd = null } } };
         return stmt;
     }
 };

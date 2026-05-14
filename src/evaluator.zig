@@ -55,6 +55,9 @@ pub const Evaluator = struct {
     /// Open files for getline redirection
     open_files: std.StringHashMapUnmanaged(std.fs.File) = .{},
 
+    /// Open output files for print/printf redirection
+    open_output_files: std.StringHashMapUnmanaged(std.fs.File) = .{},
+
     /// Field separator
     field_separator: []const u8 = " \t",
 
@@ -132,6 +135,12 @@ pub const Evaluator = struct {
         }
         self.open_files.deinit(self.allocator);
 
+        var out_file_it = self.open_output_files.iterator();
+        while (out_file_it.next()) |entry| {
+            entry.value_ptr.close();
+        }
+        self.open_output_files.deinit(self.allocator);
+
         if (self.return_value.flags.string_owned) {
             self.return_value.deinit();
         }
@@ -150,7 +159,11 @@ pub const Evaluator = struct {
 
         // Process each input line
         var line_iter = std.mem.splitScalar(u8, input, '\n');
+        var is_first = true;
         while (line_iter.next()) |line| {
+            // Skip trailing empty line from final newline
+            if (line.len == 0 and !is_first and line_iter.rest().len == 0) continue;
+            is_first = false;
             self.nr += 1;
             self.fnr += 1;
             self.setCurrentLine(line);
@@ -250,11 +263,11 @@ pub const Evaluator = struct {
             },
 
             .print => |p| {
-                try self.executePrint(p.args, p.output_file, p.append);
+                try self.executePrint(p.args, p.output_file, p.append, p.pipe_cmd);
             },
 
             .printf => |pf| {
-                try self.executePrintf(pf.format, pf.args, pf.output_file, pf.append);
+                try self.executePrintf(pf.format, pf.args, pf.output_file, pf.append, pf.pipe_cmd);
             },
 
             .if_stmt => |is| {
@@ -489,28 +502,83 @@ pub const Evaluator = struct {
         return Value.initNumber(0.0);
     }
 
-    fn executePrint(self: *Evaluator, args: []*ast.Expression, output_file: ?*ast.Expression, _: bool) !void {
-        _ = output_file; // TODO: Support file output
+    fn writeToOutput(self: *Evaluator, output_file: ?*ast.Expression, append: bool, pipe_cmd: ?*ast.Expression, data: []const u8) !void {
+        if (pipe_cmd) |pc| {
+            const cmd_val = try self.evaluateExpression(pc);
+            const cmd_str = try cmd_val.asString(self.allocator);
+            
+            // Simple pipe: spawn command, write data to stdin, wait
+            var child = std.process.Child.init(&.{"/bin/sh", "-c", cmd_str}, self.allocator);
+            child.stdin_behavior = .Pipe;
+            child.stdout_behavior = .Inherit;
+            child.stderr_behavior = .Inherit;
+            
+            child.spawn() catch return error.IoError;
+            if (child.stdin) |*stdin| {
+                _ = stdin.write(data) catch {};
+                stdin.close();
+                child.stdin = null;
+            }
+            _ = child.wait() catch {};
+            return;
+        }
+        
+        if (output_file) |of| {
+            const file_val = try self.evaluateExpression(of);
+            const file_str = try file_val.asString(self.allocator);
+
+            // Check if file is already open
+            if (self.open_output_files.get(file_str)) |*file| {
+                _ = file.write(data) catch {};
+            } else {
+                const new_file = blk: {
+                    if (append) {
+                        var file = std.fs.cwd().openFile(file_str, .{ .mode = .read_write }) catch {
+                            const created = std.fs.cwd().createFile(file_str, .{ .truncate = false }) catch return;
+                            break :blk created;
+                        };
+                        file.seekFromEnd(0) catch {};
+                        break :blk file;
+                    } else {
+                        break :blk std.fs.cwd().createFile(file_str, .{}) catch return;
+                    }
+                };
+
+                const key = try self.allocator.dupe(u8, file_str);
+                try self.open_output_files.put(self.allocator, key, new_file);
+                _ = new_file.write(data) catch {};
+            }
+        } else {
+            try self.output.appendSlice(self.allocator, data);
+        }
+    }
+
+    fn executePrint(self: *Evaluator, args: []*ast.Expression, output_file: ?*ast.Expression, append: bool, pipe_cmd: ?*ast.Expression) !void {
+        var line_output: std.ArrayListUnmanaged(u8) = .{};
+        defer line_output.deinit(self.allocator);
 
         if (args.len == 0) {
             // print $0
-            try self.output.appendSlice(self.allocator,self.current_line);
+            try line_output.appendSlice(self.allocator, self.current_line);
         } else {
             for (args, 0..) |arg, i| {
-                if (i > 0) try self.output.appendSlice(self.allocator,self.ofs);
+                if (i > 0) try line_output.appendSlice(self.allocator, self.ofs);
                 const val = try self.evaluateExpression(arg);
                 const str = try val.asString(self.allocator);
-                try self.output.appendSlice(self.allocator,str);
+                try line_output.appendSlice(self.allocator, str);
             }
         }
-        try self.output.appendSlice(self.allocator,self.ors);
+        try line_output.appendSlice(self.allocator, self.ors);
+
+        try self.writeToOutput(output_file, append, pipe_cmd, line_output.items);
     }
 
-    fn executePrintf(self: *Evaluator, format_expr: *ast.Expression, args: []*ast.Expression, output_file: ?*ast.Expression, _: bool) !void {
-        _ = output_file; // TODO: Support file output
-
+    fn executePrintf(self: *Evaluator, format_expr: *ast.Expression, args: []*ast.Expression, output_file: ?*ast.Expression, append: bool, pipe_cmd: ?*ast.Expression) !void {
         const format_val = try self.evaluateExpression(format_expr);
         const format_str = try format_val.asString(self.allocator);
+
+        var printf_output: std.ArrayListUnmanaged(u8) = .{};
+        defer printf_output.deinit(self.allocator);
 
         // Simple printf implementation
         var arg_idx: usize = 0;
@@ -519,7 +587,7 @@ pub const Evaluator = struct {
             if (format_str[i] == '%' and i + 1 < format_str.len) {
                 i += 1;
                 if (format_str[i] == '%') {
-                    try self.output.append(self.allocator,'%');
+                    try printf_output.append(self.allocator,'%');
                     i += 1;
                     continue;
                 }
@@ -554,20 +622,20 @@ pub const Evaluator = struct {
                             const n: i64 = @intFromFloat(val.asNumber());
                             const formatted = try std.fmt.allocPrint(self.allocator, "{d}", .{n});
                             defer self.allocator.free(formatted);
-                            try self.output.appendSlice(self.allocator,formatted);
+                            try printf_output.appendSlice(self.allocator,formatted);
                         },
                         'f', 'e', 'g' => {
                             const formatted = try std.fmt.allocPrint(self.allocator, "{d:.6}", .{val.asNumber()});
                             defer self.allocator.free(formatted);
-                            try self.output.appendSlice(self.allocator,formatted);
+                            try printf_output.appendSlice(self.allocator,formatted);
                         },
                         's' => {
                             const str = try val.asString(self.allocator);
-                            try self.output.appendSlice(self.allocator,str);
+                            try printf_output.appendSlice(self.allocator,str);
                         },
                         'c' => {
                             const n: u8 = @intFromFloat(val.asNumber());
-                            try self.output.append(self.allocator,n);
+                            try printf_output.append(self.allocator,n);
                         },
                         else => {},
                     }
@@ -577,22 +645,24 @@ pub const Evaluator = struct {
                 if (format_str[i] == '\\' and i + 1 < format_str.len) {
                     i += 1;
                     switch (format_str[i]) {
-                        'n' => try self.output.append(self.allocator,'\n'),
-                        't' => try self.output.append(self.allocator,'\t'),
-                        'r' => try self.output.append(self.allocator,'\r'),
-                        '\\' => try self.output.append(self.allocator,'\\'),
+                        'n' => try printf_output.append(self.allocator,'\n'),
+                        't' => try printf_output.append(self.allocator,'\t'),
+                        'r' => try printf_output.append(self.allocator,'\r'),
+                        '\\' => try printf_output.append(self.allocator,'\\'),
                         else => {
-                            try self.output.append(self.allocator,'\\');
-                            try self.output.append(self.allocator,format_str[i]);
+                            try printf_output.append(self.allocator,'\\');
+                            try printf_output.append(self.allocator,format_str[i]);
                         },
                     }
                     i += 1;
                 } else {
-                    try self.output.append(self.allocator,format_str[i]);
+                    try printf_output.append(self.allocator,format_str[i]);
                     i += 1;
                 }
             }
         }
+
+        try self.writeToOutput(output_file, append, pipe_cmd, printf_output.items);
     }
 
     fn evaluateExpression(self: *Evaluator, expr: *ast.Expression) EvalError!Value {
