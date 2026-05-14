@@ -276,14 +276,48 @@ pub fn main() !u8 {
             _ = std.posix.write(std.posix.STDOUT_FILENO, output) catch {};
             return 0;
         } else |_| {
-            // Fall back to CPU evaluator
+            // Fall back to CPU evaluator with per-file processing
             if (verbose) std.debug.print("GPU bytecode VM unavailable, using CPU evaluator\n", .{});
-            const output = executeFullAwk(program_text, text, options.field_separator, variables, allocator) catch |err| {
-                std.debug.print("gawk: error executing program: {}\n", .{err});
+            // Parse program once
+            var p = parser.Parser.init(program_text, allocator);
+            var program = p.parse() catch {
+                std.debug.print("gawk: parse error\n", .{});
                 return 1;
             };
-            defer allocator.free(output);
-            _ = std.posix.write(std.posix.STDOUT_FILENO, output) catch {};
+            defer program.deinit();
+            var eval = evaluator.Evaluator.init(allocator, &program.functions);
+            defer eval.deinit();
+            if (!std.mem.eql(u8, options.field_separator, " \t")) {
+                eval.field_separator = options.field_separator;
+            }
+            var var_it = variables.iterator();
+            while (var_it.next()) |entry| {
+                const val = Value.initString(entry.value_ptr.*);
+                try eval.variables.put(allocator, entry.key_ptr.*, val);
+            }
+            if (files.items.len > 0) {
+                for (files.items, 0..) |path, file_idx| {
+                    const file_text = readFileToString(allocator, path) catch |err| {
+                        std.debug.print("gawk: {s}: {}\n", .{ path, err });
+                        continue;
+                    };
+                    defer allocator.free(file_text);
+                    const is_last = file_idx == files.items.len - 1;
+                    const output = eval.execute(&program, file_text, path, is_last) catch |err| {
+                        std.debug.print("gawk: error executing program: {}\n", .{err});
+                        return 1;
+                    };
+                    defer allocator.free(output);
+                    _ = std.posix.write(std.posix.STDOUT_FILENO, output) catch {};
+                }
+            } else {
+                const output = eval.execute(&program, text, null, true) catch |err| {
+                    std.debug.print("gawk: error executing program: {}\n", .{err});
+                    return 1;
+                };
+                defer allocator.free(output);
+                _ = std.posix.write(std.posix.STDOUT_FILENO, output) catch {};
+            }
             return 0;
         }
     }
@@ -972,7 +1006,19 @@ fn needsFullParser(program: []const u8) bool {
 }
 
 /// Execute a complex AWK program using the full parser/evaluator
-fn executeFullAwk(program_text: []const u8, input: []const u8, field_separator: []const u8, variables: std.StringHashMapUnmanaged([]const u8), allocator: std.mem.Allocator) ![]const u8 {
+fn readFileToString(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    const file = try std.fs.cwd().openFile(path, .{});
+    defer file.close();
+    const stat = try file.stat();
+    const buf = try allocator.alloc(u8, stat.size);
+    const bytes_read = try file.readAll(buf);
+    if (bytes_read < stat.size) {
+        return buf[0..bytes_read];
+    }
+    return buf;
+}
+
+fn executeFullAwk(program_text: []const u8, input: []const u8, field_separator: []const u8, variables: std.StringHashMapUnmanaged([]const u8), allocator: std.mem.Allocator, filename: ?[]const u8) ![]const u8 {
     var p = parser.Parser.init(program_text, allocator);
     var program = p.parse() catch {
         return error.ParseError;
@@ -994,7 +1040,7 @@ fn executeFullAwk(program_text: []const u8, input: []const u8, field_separator: 
         try eval.variables.put(allocator, entry.key_ptr.*, val);
     }
 
-    return eval.execute(&program, input);
+    return eval.execute(&program, input, filename, true);
 }
 
 /// Execute full AWK program on GPU using bytecode VM

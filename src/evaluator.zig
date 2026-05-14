@@ -98,13 +98,26 @@ pub const Evaluator = struct {
     max_iterations: u32 = 10_000_000,
 
     pub fn init(allocator: Allocator, functions: *std.StringHashMapUnmanaged(ast.Function)) Evaluator {
-        return .{
+        var ev = Evaluator{
             .allocator = allocator,
             .variables = .{},
             .arrays = .{},
             .functions = functions,
             .output = .{},
         };
+        // Initialize ENVIRON array with environment variables
+        var env_map = std.process.getEnvMap(allocator) catch return ev;
+        defer env_map.deinit();
+        var env_array = std.StringHashMapUnmanaged(Value){};
+        var it = env_map.iterator();
+        while (it.next()) |entry| {
+            const key = allocator.dupe(u8, entry.key_ptr.*) catch continue;
+            const val_str = allocator.dupe(u8, entry.value_ptr.*) catch continue;
+            const val = Value.initStringOwned(val_str, allocator);
+            env_array.put(allocator, key, val) catch continue;
+        }
+        ev.arrays.put(allocator, "ENVIRON", env_array) catch {};
+        return ev;
     }
 
     pub fn deinit(self: *Evaluator) void {
@@ -146,15 +159,25 @@ pub const Evaluator = struct {
         }
     }
 
-    /// Execute a complete AWK program
-    pub fn execute(self: *Evaluator, program: *ast.Program, input: []const u8) ![]const u8 {
-        // Execute BEGIN block
-        if (program.begin) |begin| {
-            try self.executeStatement(begin);
-            if (self.control == .exit_program) {
-                return try self.output.toOwnedSlice(self.allocator);
+    /// Execute a complete AWK program on input text
+    /// If filename is provided, sets FILENAME and resets FNR (for multi-file processing)
+    /// run_end controls whether END block executes (set to false for intermediate files in multi-file mode)
+    pub fn execute(self: *Evaluator, program: *ast.Program, input: []const u8, maybe_filename: ?[]const u8, run_end: bool) ![]const u8 {
+        // Set filename if provided
+        if (maybe_filename) |fname| {
+            self.filename = fname;
+            self.fnr = 0;
+        }
+
+        // Execute BEGIN block (only on first call)
+        if (self.nr == 0) {
+            if (program.begin) |begin| {
+                try self.executeStatement(begin);
+                if (self.control == .exit_program) {
+                    return try self.output.toOwnedSlice(self.allocator);
+                }
+                self.control = .normal;
             }
-            self.control = .normal;
         }
 
         // Process each input line
@@ -181,22 +204,18 @@ pub const Evaluator = struct {
                     try self.executeStatement(rule.action);
                 }
 
-                if (self.control == .next_line) {
-                    self.control = .normal;
-                    break;
-                }
-                if (self.control == .exit_program) {
-                    break;
-                }
+                if (self.control == .exit_program) break;
             }
 
             if (self.control == .exit_program) break;
         }
 
-        // Execute END block
-        if (program.end) |end| {
-            self.control = .normal;
-            try self.executeStatement(end);
+        // Execute END block (only on last file or single file)
+        if (run_end) {
+            if (program.end) |end| {
+                self.control = .normal;
+                try self.executeStatement(end);
+            }
         }
 
         return try self.output.toOwnedSlice(self.allocator);
@@ -1160,7 +1179,7 @@ test "Evaluator: simple print" {
     var eval = Evaluator.init(allocator, &program.functions);
     defer eval.deinit();
 
-    const output = try eval.execute(&program, "hello world");
+    const output = try eval.execute(&program, "hello world", null, true);
     defer allocator.free(output);
 
     try std.testing.expectEqualStrings("hello\n", output);
@@ -1176,7 +1195,7 @@ test "Evaluator: arithmetic expression" {
     var eval = Evaluator.init(allocator, &program.functions);
     defer eval.deinit();
 
-    const output = try eval.execute(&program, "");
+    const output = try eval.execute(&program, "", null, true);
     defer allocator.free(output);
 
     try std.testing.expectEqualStrings("14\n", output);
@@ -1192,7 +1211,7 @@ test "Evaluator: variable assignment" {
     var eval = Evaluator.init(allocator, &program.functions);
     defer eval.deinit();
 
-    const output = try eval.execute(&program, "");
+    const output = try eval.execute(&program, "", null, true);
     defer allocator.free(output);
 
     try std.testing.expectEqualStrings("5\n", output);
