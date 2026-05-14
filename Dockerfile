@@ -1,5 +1,5 @@
 # Stage 1: Builder
-FROM alpine:3 AS builder
+FROM alpine:3.19 AS builder
 
 # Install build dependencies including Vulkan
 RUN apk add --no-cache \
@@ -31,9 +31,9 @@ COPY . .
 ARG BINARY_NAME=gawk
 ARG BUILD_VARIANT=pure
 RUN if [ "$BUILD_VARIANT" = "gnu" ]; then \
-        zig build -Doptimize=ReleaseFast -Dgnu=true; \
+        zig build -Doptimize=ReleaseFast -Dgnu=true -Dcpu=baseline; \
     else \
-        zig build -Doptimize=ReleaseFast; \
+        zig build -Doptimize=ReleaseFast -Dcpu=baseline; \
     fi && \
     mv zig-out/bin/${BINARY_NAME} /${BINARY_NAME}
 
@@ -43,7 +43,7 @@ ARG BINARY_NAME=gawk
 COPY --from=builder /${BINARY_NAME} /${BINARY_NAME}
 
 # Stage 3: Runtime (pure variant)
-FROM alpine:3 AS runtime
+FROM alpine:3.19 AS runtime
 
 ARG TARGETARCH
 ARG BINARY_NAME=gawk
