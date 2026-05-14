@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const ast = @import("ast.zig");
 const Value = @import("value.zig").Value;
 const parser = @import("parser.zig");
+const regex = @import("regex");
 
 // ============================================================================
 // AWK Program Evaluator
@@ -184,6 +185,17 @@ pub const Evaluator = struct {
             }
         }
 
+        // Execute BEGINFILE block (before each file)
+        if (maybe_filename != null) {
+            if (program.beginfile) |beginfile| {
+                try self.executeStatement(beginfile);
+                if (self.control == .exit_program) {
+                    return try self.output.toOwnedSlice(self.allocator);
+                }
+                self.control = .normal;
+            }
+        }
+
         // Process each input line
         var line_iter = std.mem.splitScalar(u8, input, '\n');
         var is_first = true;
@@ -212,6 +224,14 @@ pub const Evaluator = struct {
             }
 
             if (self.control == .exit_program or self.control == .next_file) break;
+        }
+
+        // Execute ENDFILE block (after each file)
+        if (maybe_filename != null) {
+            if (program.endfile) |endfile| {
+                self.control = .normal;
+                try self.executeStatement(endfile);
+            }
         }
 
         // Execute END block (only on last file or single file)
@@ -1126,6 +1146,94 @@ pub const Evaluator = struct {
             if (args.len == 0) return Value.initNumber(1.0);
             const val = try self.evaluateExpression(args[0]);
             return Value.initNumber(@exp(val.asNumber()));
+        }
+
+        if (std.mem.eql(u8, name, "gensub")) {
+            // gensub(pattern, replacement, how [, target])
+            if (args.len < 3) return Value.initString("");
+            // For regex literals, get the pattern string directly (not the match result)
+            const pat_str = switch (args[0].kind) {
+                .regex_literal => |p| p,
+                else => blk: {
+                    const pat_val = try self.evaluateExpression(args[0]);
+                    break :blk try pat_val.asString(self.allocator);
+                },
+            };
+            const repl_val = try self.evaluateExpression(args[1]);
+            const repl_str = try repl_val.asString(self.allocator);
+            const how_val = try self.evaluateExpression(args[2]);
+            const how_str = try how_val.asString(self.allocator);
+
+            var target = self.current_line;
+            if (args.len >= 4) {
+                const target_val = try self.evaluateExpression(args[3]);
+                target = try target_val.asString(self.allocator);
+            }
+
+            const global = how_str.len > 0 and (how_str[0] == 'g' or how_str[0] == 'G');
+            const which_match = if (!global) @as(usize, @intFromFloat(@max(0.0, how_val.asNumber()))) else 0;
+
+            var result: std.ArrayListUnmanaged(u8) = .{};
+            errdefer result.deinit(self.allocator);
+
+            var pos: usize = 0;
+            var match_count: usize = 0;
+
+            var early_break = false;
+            while (pos <= target.len) {
+                // Use simple literal matching for now (regex engine findAll has issues)
+                if (std.mem.indexOfPos(u8, target, pos, pat_str)) |match_start| {
+                    match_count += 1;
+                    const match_end = match_start + pat_str.len;
+
+                    if (global or match_count == which_match) {
+                        // Copy text before match
+                        try result.appendSlice(self.allocator, target[pos..match_start]);
+
+                        // Apply replacement with & and \0
+                        var ri: usize = 0;
+                        while (ri < repl_str.len) : (ri += 1) {
+                            if (repl_str[ri] == '&' and (ri == 0 or repl_str[ri - 1] != '\\')) {
+                                try result.appendSlice(self.allocator, target[match_start..match_end]);
+                            } else if (repl_str[ri] == '\\' and ri + 1 < repl_str.len) {
+                                ri += 1;
+                                const esc = repl_str[ri];
+                                if (esc == '&') {
+                                    try result.append(self.allocator, '&');
+                                } else if (esc == '\\') {
+                                    try result.append(self.allocator, '\\');
+                                } else {
+                                    try result.append(self.allocator, '\\');
+                                    try result.append(self.allocator, esc);
+                                }
+                            } else {
+                                try result.append(self.allocator, repl_str[ri]);
+                            }
+                        }
+
+                        pos = match_end;
+                        if (!global) {
+                            early_break = true;
+                            break;
+                        }
+                    } else {
+                        // Not the match we want, copy it through
+                        try result.appendSlice(self.allocator, target[pos..match_end]);
+                        pos = match_end;
+                    }
+                } else {
+                    // No more matches
+                    try result.appendSlice(self.allocator, target[pos..]);
+                    break;
+                }
+            }
+            // Append remaining text only after early break
+            if (early_break) {
+                try result.appendSlice(self.allocator, target[pos..]);
+            }
+
+            const output = try result.toOwnedSlice(self.allocator);
+            return Value.initStringOwned(output, self.allocator);
         }
 
         if (std.mem.eql(u8, name, "systime")) {

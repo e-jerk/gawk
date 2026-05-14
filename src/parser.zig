@@ -41,6 +41,8 @@ pub const Token = struct {
         // Keywords
         kw_begin,
         kw_end,
+        kw_beginfile,
+        kw_endfile,
         kw_if,
         kw_else,
         kw_while,
@@ -358,6 +360,8 @@ pub const Tokenizer = struct {
         const keywords = std.StaticStringMap(Token.Kind).initComptime(.{
             .{ "BEGIN", .kw_begin },
             .{ "END", .kw_end },
+            .{ "BEGINFILE", .kw_beginfile },
+            .{ "ENDFILE", .kw_endfile },
             .{ "if", .kw_if },
             .{ "else", .kw_else },
             .{ "while", .kw_while },
@@ -432,9 +436,15 @@ pub const Parser = struct {
             if (self.check(.kw_begin)) {
                 self.advance();
                 program.begin = try self.parseAction();
+            } else if (self.check(.kw_beginfile)) {
+                self.advance();
+                program.beginfile = try self.parseAction();
             } else if (self.check(.kw_end)) {
                 self.advance();
                 program.end = try self.parseAction();
+            } else if (self.check(.kw_endfile)) {
+                self.advance();
+                program.endfile = try self.parseAction();
             } else if (self.check(.kw_function)) {
                 const func = try self.parseFunction();
                 try program.functions.put(self.allocator, func.name, func);

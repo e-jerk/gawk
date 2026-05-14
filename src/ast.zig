@@ -12,8 +12,14 @@ pub const Program = struct {
     /// BEGIN block statements (executed before input processing)
     begin: ?*Statement = null,
 
+    /// BEGINFILE block statements (executed before each file)
+    beginfile: ?*Statement = null,
+
     /// Pattern-action rules (executed for each input line)
     rules: []Rule = &.{},
+
+    /// ENDFILE block statements (executed after each file)
+    endfile: ?*Statement = null,
 
     /// END block statements (executed after all input)
     end: ?*Statement = null,
@@ -25,11 +31,13 @@ pub const Program = struct {
 
     pub fn deinit(self: *Program) void {
         if (self.begin) |b| b.deinit(self.allocator);
+        if (self.beginfile) |bf| bf.deinit(self.allocator);
         for (self.rules) |rule| {
             if (rule.pattern) |p| p.deinit(self.allocator);
             rule.action.deinit(self.allocator);
         }
         if (self.rules.len > 0) self.allocator.free(self.rules);
+        if (self.endfile) |ef| ef.deinit(self.allocator);
         if (self.end) |e| e.deinit(self.allocator);
 
         var it = self.functions.iterator();
