@@ -31,6 +31,7 @@ pub fn main() !u8 {
     var verbose = false;
     var backend_mode: BackendMode = .auto;
     var is_substitution = false;
+    var substitution_global = true; // true = gsub, false = sub
     var builtin_call: ?BuiltinCall = null;
     var special_var: SpecialVar = .none;
     var allocated_fields: ?[]const u32 = null;
@@ -188,8 +189,9 @@ pub fn main() !u8 {
                 const parsed = try parseAwkProgram(arg, allocator, &options);
                 pattern = parsed.pattern;
                 action = parsed.action;
-                if (parsed.is_gsub) {
+                if (parsed.is_gsub or parsed.is_sub) {
                     is_substitution = true;
+                    substitution_global = parsed.is_gsub;
                     replacement = parsed.replacement;
                 }
                 options.requested_fields = parsed.fields;
@@ -209,8 +211,9 @@ pub fn main() !u8 {
         const parsed = try parseAwkProgram(program_text, allocator, &options);
         pattern = parsed.pattern;
         action = parsed.action;
-        if (parsed.is_gsub) {
+        if (parsed.is_gsub or parsed.is_sub) {
             is_substitution = true;
+            substitution_global = parsed.is_gsub;
             replacement = parsed.replacement;
         }
         options.requested_fields = parsed.fields;
@@ -285,7 +288,7 @@ pub fn main() !u8 {
         }
     }
 
-    // Handle substitution mode (gsub)
+    // Handle substitution mode (sub / gsub)
     if (is_substitution) {
         // Check if pattern contains regex metacharacters
         const use_regex = isRegexPattern(pattern);
@@ -294,7 +297,8 @@ pub fn main() !u8 {
             const substitutions = try cpu.findSubstitutionsRegex(text, pattern, options, allocator);
             defer allocator.free(substitutions);
 
-            const result_text = try cpu.applySubstitutionsRegex(text, substitutions, replacement, allocator);
+            const subs_to_apply = if (substitution_global) substitutions else if (substitutions.len > 0) substitutions[0..1] else substitutions;
+            const result_text = try cpu.applySubstitutionsRegex(text, subs_to_apply, replacement, allocator);
             defer allocator.free(result_text);
 
             _ = std.posix.write(std.posix.STDOUT_FILENO, result_text) catch {};
@@ -302,7 +306,8 @@ pub fn main() !u8 {
             const substitutions = try cpu.findSubstitutions(text, pattern, options, allocator);
             defer allocator.free(substitutions);
 
-            const result_text = try cpu.applySubstitutions(text, substitutions, pattern.len, replacement, allocator);
+            const subs_to_apply = if (substitution_global) substitutions else if (substitutions.len > 0) substitutions[0..1] else substitutions;
+            const result_text = try cpu.applySubstitutions(text, subs_to_apply, pattern.len, replacement, allocator);
             defer allocator.free(result_text);
 
             _ = std.posix.write(std.posix.STDOUT_FILENO, result_text) catch {};
@@ -539,7 +544,7 @@ const BuiltinCall = struct {
 /// Special variable types
 const SpecialVar = enum {
     none,
-    nr, // NR - line number
+    nr, // NR - total line number across all files
     nf, // NF - number of fields
 };
 
@@ -547,31 +552,33 @@ const ParsedProgram = struct {
     pattern: []const u8,
     action: []const u8,
     fields: []const u32,
+    builtin: ?BuiltinCall = null,
+    special_var: SpecialVar,
     is_gsub: bool,
-    replacement: []const u8,
-    builtin: ?BuiltinCall = null, // Built-in function to apply
-    special_var: SpecialVar = .none, // Special variable to print
+    is_sub: bool,
+    replacement: []const u8 = "",
+
+    pub fn init() ParsedProgram {
+        return .{
+            .pattern = "",
+            .action = "",
+            .fields = &[_]u32{},
+            .builtin = null,
+            .special_var = .none,
+            .is_gsub = false,
+            .is_sub = false,
+            .replacement = "",
+        };
+    }
 };
 
 fn parseAwkProgram(program: []const u8, allocator: std.mem.Allocator, options: *AwkOptions) !ParsedProgram {
-    var result = ParsedProgram{
-        .pattern = "",
-        .action = "",
-        .fields = &.{},
-        .is_gsub = false,
-        .replacement = "",
-    };
-
+    _ = options;
+    var result = ParsedProgram.init();
     var i: usize = 0;
 
     // Skip whitespace
     while (i < program.len and (program[i] == ' ' or program[i] == '\t')) i += 1;
-
-    // Check for inverted pattern: !/pattern/
-    if (i < program.len and program[i] == '!' and i + 1 < program.len and program[i + 1] == '/') {
-        options.invert_match = true;
-        i += 1; // Skip '!'
-    }
 
     // Check for pattern: /pattern/
     if (i < program.len and program[i] == '/') {
@@ -600,12 +607,32 @@ fn parseAwkProgram(program: []const u8, allocator: std.mem.Allocator, options: *
         // Parse action for print fields or gsub
         const action = result.action;
 
-        // Check for gsub
+        // Check for gsub or sub
         if (std.mem.indexOf(u8, action, "gsub(")) |gsub_start| {
             result.is_gsub = true;
 
             // Parse gsub(/pattern/, "replacement")
             var j = gsub_start + 5; // After "gsub("
+
+            // Skip to pattern
+            while (j < action.len and action[j] != '/') j += 1;
+            if (j < action.len) j += 1;
+            const pat_start = j;
+            while (j < action.len and action[j] != '/') j += 1;
+            result.pattern = action[pat_start..j];
+            if (j < action.len) j += 1;
+
+            // Skip to replacement
+            while (j < action.len and action[j] != '"') j += 1;
+            if (j < action.len) j += 1;
+            const repl_start = j;
+            while (j < action.len and action[j] != '"') j += 1;
+            result.replacement = action[repl_start..j];
+        } else if (std.mem.indexOf(u8, action, "sub(")) |sub_start| {
+            result.is_sub = true;
+
+            // Parse sub(/pattern/, "replacement")
+            var j = sub_start + 4; // After "sub("
 
             // Skip to pattern
             while (j < action.len and action[j] != '/') j += 1;
@@ -910,6 +937,7 @@ fn needsFullParser(program: []const u8) bool {
             if (i < program.len and program[i] == '=' and (i + 1 >= program.len or program[i + 1] != '=')) {
                 // It's an assignment - check if it's not inside gsub()
                 const before = program[0..ident_start];
+                // Exclude assignments inside gsub()/sub() which use = as regex delimiter
                 if (std.mem.indexOf(u8, before, "gsub(") == null and
                     std.mem.indexOf(u8, before, "sub(") == null)
                 {
