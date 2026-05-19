@@ -54,6 +54,7 @@ var vulkan_loader: ?VulkanLoader = null;
 fn getVkGetInstanceProcAddr() !vk.PfnGetInstanceProcAddr {
     if (vulkan_loader) |loader| return loader.getProcAddr;
     vulkan_loader = try VulkanLoader.load();
+    // safe-transpile: optional unwrap requires manual review
     return vulkan_loader.?.getProcAddr;
 }
 
@@ -87,43 +88,49 @@ pub const VulkanAwk = struct {
 
         const app_info = vk.ApplicationInfo{
             .p_application_name = "gawk",
-            .application_version = @bitCast(vk.makeApiVersion(0, 1, 0, 0)),
+            .application_version = // safe-transpile: @bitCast requires manual review
+            @bitCast(vk.makeApiVersion(0, 1, 0, 0)),
             .p_engine_name = "gawk",
-            .engine_version = @bitCast(vk.makeApiVersion(0, 1, 0, 0)),
-            .api_version = @bitCast(vk.API_VERSION_1_2),
+            .engine_version = // safe-transpile: @bitCast requires manual review
+            @bitCast(vk.makeApiVersion(0, 1, 0, 0)),
+            .api_version = // safe-transpile: @bitCast requires manual review
+            @bitCast(vk.API_VERSION_1_2),
         };
 
         const instance = vkb.createInstance(&.{ .p_application_info = &app_info, .enabled_layer_count = 0, .pp_enabled_layer_names = null, .enabled_extension_count = 0, .pp_enabled_extension_names = null }, null) catch return error.InstanceCreationFailed;
-        const vki = vk.InstanceWrapper.load(instance, vkb.dispatch.vkGetInstanceProcAddr.?);
+        const get_proc_addr = if (vkb.dispatch.vkGetInstanceProcAddr) |value| value else return error.NullPointer;
+        const vki = vk.InstanceWrapper.load(instance, get_proc_addr);
         errdefer vki.destroyInstance(instance, null);
 
         var device_count: u32 = 0;
         _ = try vki.enumeratePhysicalDevices(instance, &device_count, null);
         if (device_count == 0) return error.NoVulkanDevice;
 
-        var physical_devices: [16]vk.PhysicalDevice = undefined;
+        var physical_devices: [16]vk.PhysicalDevice = .{};
         device_count = @min(device_count, 16);
         _ = try vki.enumeratePhysicalDevices(instance, &device_count, &physical_devices);
 
         var selected_device: ?vk.PhysicalDevice = null;
         var selected_queue_family: u32 = 0;
-        var selected_props: vk.PhysicalDeviceProperties = undefined;
+        var selected_props: vk.PhysicalDeviceProperties = std.mem.zeroes(vk.PhysicalDeviceProperties);
 
         for (physical_devices[0..device_count]) |pdev| {
             const props = vki.getPhysicalDeviceProperties(pdev);
 
             var queue_count: u32 = 0;
             vki.getPhysicalDeviceQueueFamilyProperties(pdev, &queue_count, null);
-            var queue_props: [32]vk.QueueFamilyProperties = undefined;
+            var queue_props: [32]vk.QueueFamilyProperties = .{};
             queue_count = @min(queue_count, 32);
             vki.getPhysicalDeviceQueueFamilyProperties(pdev, &queue_count, &queue_props);
 
+            // safe-transpile: for with index access requires manual review
             for (queue_props[0..queue_count], 0..) |qp, i| {
                 if (qp.queue_flags.compute_bit) {
                     if (selected_device == null or
                         (props.device_type == .discrete_gpu and selected_props.device_type != .discrete_gpu))
                     {
                         selected_device = pdev;
+                        // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                         selected_queue_family = @intCast(i);
                         selected_props = props;
                     }
@@ -137,7 +144,8 @@ pub const VulkanAwk = struct {
         const queue_priority: f32 = 1.0;
         const device = vki.createDevice(physical_device, &.{
             .queue_create_info_count = 1,
-            .p_queue_create_infos = @ptrCast(&vk.DeviceQueueCreateInfo{ .queue_family_index = selected_queue_family, .queue_count = 1, .p_queue_priorities = @ptrCast(&queue_priority) }),
+            .p_queue_create_infos = // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+            @ptrCast(&vk.DeviceQueueCreateInfo{ .queue_family_index = selected_queue_family, .queue_count = 1, .p_queue_priorities = @ptrCast(&queue_priority) }),
             .enabled_layer_count = 0,
             .pp_enabled_layer_names = null,
             .enabled_extension_count = 0,
@@ -145,12 +153,17 @@ pub const VulkanAwk = struct {
             .p_enabled_features = null,
         }, null) catch return error.DeviceCreationFailed;
 
-        const vkd = vk.DeviceWrapper.load(device, vki.dispatch.vkGetDeviceProcAddr.?);
+        const get_device_proc = if (vki.dispatch.vkGetDeviceProcAddr) |value| value else return error.NullPointer;
+        const vkd = vk.DeviceWrapper.load(device, get_device_proc);
         errdefer vkd.destroyDevice(device, null);
 
         const compute_queue = vkd.getDeviceQueue(device, selected_queue_family, 0);
 
-        const shader_module = vkd.createShaderModule(device, &.{ .code_size = spirv.EMBEDDED_SPIRV.len, .p_code = @ptrCast(@alignCast(spirv.EMBEDDED_SPIRV.ptr)) }, null) catch return error.ShaderModuleCreationFailed;
+        const shader_module = vkd.createShaderModule(device, &.{
+            .code_size = spirv.EMBEDDED_SPIRV.len,
+            .p_code = // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+            @ptrCast(@alignCast(spirv.EMBEDDED_SPIRV.ptr)),
+        }, null) catch return error.ShaderModuleCreationFailed;
         errdefer vkd.destroyShaderModule(device, shader_module, null);
 
         const bindings = [_]vk.DescriptorSetLayoutBinding{
@@ -167,32 +180,51 @@ pub const VulkanAwk = struct {
         const descriptor_set_layout = vkd.createDescriptorSetLayout(device, &.{ .binding_count = bindings.len, .p_bindings = &bindings }, null) catch return error.DescriptorSetLayoutCreationFailed;
         errdefer vkd.destroyDescriptorSetLayout(device, descriptor_set_layout, null);
 
-        const pipeline_layout = vkd.createPipelineLayout(device, &.{ .set_layout_count = 1, .p_set_layouts = @ptrCast(&descriptor_set_layout), .push_constant_range_count = 0, .p_push_constant_ranges = null }, null) catch return error.PipelineLayoutCreationFailed;
+        const pipeline_layout = vkd.createPipelineLayout(device, &.{
+            .set_layout_count = 1,
+            .p_set_layouts = // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+            @ptrCast(&descriptor_set_layout),
+            .push_constant_range_count = 0,
+            .p_push_constant_ranges = null,
+        }, null) catch return error.PipelineLayoutCreationFailed;
         errdefer vkd.destroyPipelineLayout(device, pipeline_layout, null);
 
-        var compute_pipeline: vk.Pipeline = undefined;
-        _ = vkd.createComputePipelines(device, .null_handle, 1, @ptrCast(&vk.ComputePipelineCreateInfo{
-            .stage = .{ .stage = .{ .compute_bit = true }, .module = shader_module, .p_name = "main", .p_specialization_info = null },
-            .layout = pipeline_layout,
-            .base_pipeline_handle = .null_handle,
-            .base_pipeline_index = -1,
-        }), null, @ptrCast(&compute_pipeline)) catch return error.ComputePipelineCreationFailed;
+        var compute_pipeline: vk.Pipeline = std.mem.zeroes(vk.Pipeline);
+        _ = vkd.createComputePipelines(device, .null_handle, 1, // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+            @ptrCast(&vk.ComputePipelineCreateInfo{
+                .stage = .{ .stage = .{ .compute_bit = true }, .module = shader_module, .p_name = "main", .p_specialization_info = null },
+                .layout = pipeline_layout,
+                .base_pipeline_handle = .null_handle,
+                .base_pipeline_index = -1,
+            }), null, // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+            @ptrCast(&compute_pipeline)) catch return error.ComputePipelineCreationFailed;
         errdefer vkd.destroyPipeline(device, compute_pipeline, null);
 
         // Create regex shader module and pipeline
-        const regex_shader_module = vkd.createShaderModule(device, &.{ .code_size = spirv.EMBEDDED_SPIRV_REGEX.len, .p_code = @ptrCast(@alignCast(spirv.EMBEDDED_SPIRV_REGEX.ptr)) }, null) catch return error.ShaderModuleCreationFailed;
+        const regex_shader_module = vkd.createShaderModule(device, &.{
+            .code_size = spirv.EMBEDDED_SPIRV_REGEX.len,
+            .p_code = // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+            @ptrCast(@alignCast(spirv.EMBEDDED_SPIRV_REGEX.ptr)),
+        }, null) catch return error.ShaderModuleCreationFailed;
         errdefer vkd.destroyShaderModule(device, regex_shader_module, null);
 
-        var regex_compute_pipeline: vk.Pipeline = undefined;
-        _ = vkd.createComputePipelines(device, .null_handle, 1, @ptrCast(&vk.ComputePipelineCreateInfo{
-            .stage = .{ .stage = .{ .compute_bit = true }, .module = regex_shader_module, .p_name = "main", .p_specialization_info = null },
-            .layout = pipeline_layout,
-            .base_pipeline_handle = .null_handle,
-            .base_pipeline_index = -1,
-        }), null, @ptrCast(&regex_compute_pipeline)) catch return error.ComputePipelineCreationFailed;
+        var regex_compute_pipeline: vk.Pipeline = std.mem.zeroes(vk.Pipeline);
+        _ = vkd.createComputePipelines(device, .null_handle, 1, // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+            @ptrCast(&vk.ComputePipelineCreateInfo{
+                .stage = .{ .stage = .{ .compute_bit = true }, .module = regex_shader_module, .p_name = "main", .p_specialization_info = null },
+                .layout = pipeline_layout,
+                .base_pipeline_handle = .null_handle,
+                .base_pipeline_index = -1,
+            }), null, // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+            @ptrCast(&regex_compute_pipeline)) catch return error.ComputePipelineCreationFailed;
         errdefer vkd.destroyPipeline(device, regex_compute_pipeline, null);
 
-        const descriptor_pool = vkd.createDescriptorPool(device, &.{ .max_sets = 1, .pool_size_count = 1, .p_pool_sizes = @ptrCast(&vk.DescriptorPoolSize{ .type = .storage_buffer, .descriptor_count = 8 }) }, null) catch return error.DescriptorPoolCreationFailed;
+        const descriptor_pool = vkd.createDescriptorPool(device, &.{
+            .max_sets = 1,
+            .pool_size_count = 1,
+            .p_pool_sizes = // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+            @ptrCast(&vk.DescriptorPoolSize{ .type = .storage_buffer, .descriptor_count = 8 }),
+        }, null) catch return error.DescriptorPoolCreationFailed;
         errdefer vkd.destroyDescriptorPool(device, descriptor_pool, null);
 
         const command_pool = vkd.createCommandPool(device, &.{ .queue_family_index = selected_queue_family, .flags = .{ .reset_command_buffer_bit = true } }, null) catch return error.CommandPoolCreationFailed;
@@ -231,8 +263,8 @@ pub const VulkanAwk = struct {
             .device_type = device_type,
         };
 
-        const self = try allocator.create(Self);
-        self.* = Self{
+        const self = try safe.Box(Self).init(allocator, undefined);
+        self[0] = Self{
             .instance = instance,
             .physical_device = physical_device,
             .device = device,
@@ -288,6 +320,7 @@ pub const VulkanAwk = struct {
         self.vkd.destroyBuffer(self.device, buf.buffer, null);
     }
 
+    // safe-transpile: function uses raw slice parameter — consider safe.String
     pub fn processAwk(self: *Self, text: []const u8, pattern: []const u8, options: AwkOptions, allocator: std.mem.Allocator) !AwkResult {
         if (text.len > MAX_GPU_BUFFER_SIZE) return error.TextTooLarge;
 
@@ -298,15 +331,20 @@ pub const VulkanAwk = struct {
         defer line_lengths.deinit(allocator);
 
         var line_start: usize = 0;
+        // safe-transpile: for with index access requires manual review
         for (text, 0..) |c, i| {
             if (c == '\n') {
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 try line_offsets.append(allocator, @intCast(line_start));
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 try line_lengths.append(allocator, @intCast(i - line_start));
                 line_start = i + 1;
             }
         }
         if (line_start < text.len) {
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             try line_offsets.append(allocator, @intCast(line_start));
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             try line_lengths.append(allocator, @intCast(text.len - line_start));
         }
 
@@ -322,30 +360,38 @@ pub const VulkanAwk = struct {
         }
 
         // Create buffers
+        // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
         const text_size: vk.DeviceSize = @intCast(((text.len + 3) / 4) * 4);
         const text_buffer = try self.createBuffer(text_size);
         defer self.destroyBuffer(text_buffer);
-        @memcpy(@as([*]u8, @ptrCast(text_buffer.mapped))[0..text.len], text);
+        safe.SimdUtils.copy(@as([*]u8, @ptrCast(text_buffer.mapped))[0..text.len], text);
 
         const pattern_len = if (pattern.len > 0) pattern.len else 1;
+        // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
         const pattern_size: vk.DeviceSize = @intCast(((pattern_len + 3) / 4) * 4);
         const pattern_buffer = try self.createBuffer(pattern_size);
         defer self.destroyBuffer(pattern_buffer);
         if (pattern.len > 0) {
-            @memcpy(@as([*]u8, @ptrCast(pattern_buffer.mapped))[0..pattern.len], pattern);
+            safe.SimdUtils.copy(@as([*]u8, @ptrCast(pattern_buffer.mapped))[0..pattern.len], pattern);
         }
 
         const skip_buffer = try self.createBuffer(256);
         defer self.destroyBuffer(skip_buffer);
         const skip_table = if (pattern.len > 0) mod.buildSkipTable(pattern, options.case_insensitive) else [_]u8{1} ** 256;
-        @as(*[256]u8, @ptrCast(@alignCast(skip_buffer.mapped))).* = skip_table;
+        @as(*[256]u8, // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+            @ptrCast(@alignCast(skip_buffer.mapped))).* = skip_table;
 
         const config_buffer = try self.createBuffer(@sizeOf(AwkConfig));
         defer self.destroyBuffer(config_buffer);
-        @as(*AwkConfig, @ptrCast(@alignCast(config_buffer.mapped))).* = AwkConfig{
+        @as(*AwkConfig, // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+            @ptrCast(@alignCast(config_buffer.mapped))).* = AwkConfig{
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             .text_len = @intCast(text.len),
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             .pattern_len = @intCast(pattern.len),
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             .field_sep_len = @intCast(options.field_separator.len),
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             .num_fields_requested = @intCast(options.requested_fields.len),
             .flags = options.toFlags(),
             .max_results = MAX_RESULTS,
@@ -353,29 +399,39 @@ pub const VulkanAwk = struct {
             .replacement_len = 0,
         };
 
+        // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
         const results_size: vk.DeviceSize = @intCast(@sizeOf(AwkMatchResult) * MAX_RESULTS);
         const results_buffer = try self.createBuffer(results_size);
         defer self.destroyBuffer(results_buffer);
 
         const counters_buffer = try self.createBuffer(8);
         defer self.destroyBuffer(counters_buffer);
-        const counters_ptr: *[2]u32 = @ptrCast(@alignCast(counters_buffer.mapped));
+        const counters_ptr: *[2]u32 = // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+            @ptrCast(@alignCast(counters_buffer.mapped));
         counters_ptr[0] = 0;
         counters_ptr[1] = 0;
 
+        // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
         const line_offsets_size: vk.DeviceSize = @intCast(line_offsets.items.len * @sizeOf(u32));
         const line_offsets_buffer = try self.createBuffer(line_offsets_size);
         defer self.destroyBuffer(line_offsets_buffer);
-        @memcpy(@as([*]u32, @ptrCast(@alignCast(line_offsets_buffer.mapped)))[0..line_offsets.items.len], line_offsets.items);
+        safe.SimdUtils.copy(@as([*]u32, @ptrCast(@alignCast(line_offsets_buffer.mapped)))[0..line_offsets.items.len], line_offsets.items);
 
+        // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
         const line_lengths_size: vk.DeviceSize = @intCast(line_lengths.items.len * @sizeOf(u32));
         const line_lengths_buffer = try self.createBuffer(line_lengths_size);
         defer self.destroyBuffer(line_lengths_buffer);
-        @memcpy(@as([*]u32, @ptrCast(@alignCast(line_lengths_buffer.mapped)))[0..line_lengths.items.len], line_lengths.items);
+        safe.SimdUtils.copy(@as([*]u32, @ptrCast(@alignCast(line_lengths_buffer.mapped)))[0..line_lengths.items.len], line_lengths.items);
 
         // Set up descriptor set
-        var descriptor_set: vk.DescriptorSet = undefined;
-        self.vkd.allocateDescriptorSets(self.device, &.{ .descriptor_pool = self.descriptor_pool, .descriptor_set_count = 1, .p_set_layouts = @ptrCast(&self.descriptor_set_layout) }, @ptrCast(&descriptor_set)) catch return error.DescriptorSetAllocationFailed;
+        var descriptor_set: vk.DescriptorSet = std.mem.zeroes(vk.DescriptorSet);
+        self.vkd.allocateDescriptorSets(self.device, &.{
+            .descriptor_pool = self.descriptor_pool,
+            .descriptor_set_count = 1,
+            .p_set_layouts = // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+            @ptrCast(&self.descriptor_set_layout),
+        }, // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+            @ptrCast(&descriptor_set)) catch return error.DescriptorSetAllocationFailed;
 
         const buffer_infos = [_]vk.DescriptorBufferInfo{
             .{ .buffer = text_buffer.buffer, .offset = 0, .range = text_size },
@@ -388,62 +444,74 @@ pub const VulkanAwk = struct {
             .{ .buffer = line_lengths_buffer.buffer, .offset = 0, .range = line_lengths_size },
         };
 
-        var writes: [8]vk.WriteDescriptorSet = undefined;
+        var writes: [8]vk.WriteDescriptorSet = .{};
         for (0..8) |i| {
             writes[i] = .{
                 .dst_set = descriptor_set,
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 .dst_binding = @intCast(i),
                 .dst_array_element = 0,
                 .descriptor_count = 1,
                 .descriptor_type = .storage_buffer,
                 .p_image_info = undefined,
-                .p_buffer_info = @ptrCast(&buffer_infos[i]),
+                .p_buffer_info = // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+                @ptrCast(&buffer_infos[i]),
                 .p_texel_buffer_view = undefined,
             };
         }
         self.vkd.updateDescriptorSets(self.device, 8, &writes, 0, undefined);
 
         // Execute
-        var command_buffer: vk.CommandBuffer = undefined;
-        self.vkd.allocateCommandBuffers(self.device, &.{ .command_pool = self.command_pool, .level = .primary, .command_buffer_count = 1 }, @ptrCast(&command_buffer)) catch return error.CommandBufferAllocationFailed;
-        defer self.vkd.freeCommandBuffers(self.device, self.command_pool, 1, @ptrCast(&command_buffer));
+        var command_buffer: vk.CommandBuffer = std.mem.zeroes(vk.CommandBuffer);
+        self.vkd.allocateCommandBuffers(self.device, &.{ .command_pool = self.command_pool, .level = .primary, .command_buffer_count = 1 }, // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+            @ptrCast(&command_buffer)) catch return error.CommandBufferAllocationFailed;
+        defer self.vkd.freeCommandBuffers(self.device, self.command_pool, 1, // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+            @ptrCast(&command_buffer));
 
         self.vkd.beginCommandBuffer(command_buffer, &.{ .flags = .{ .one_time_submit_bit = true } }) catch return error.CommandBufferBeginFailed;
         self.vkd.cmdBindPipeline(command_buffer, .compute, self.compute_pipeline);
-        self.vkd.cmdBindDescriptorSets(command_buffer, .compute, self.pipeline_layout, 0, 1, @ptrCast(&descriptor_set), 0, undefined);
+        self.vkd.cmdBindDescriptorSets(command_buffer, .compute, self.pipeline_layout, 0, 1, // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+            @ptrCast(&descriptor_set), 0, undefined);
 
         const workgroups = @max(1, (num_lines + 63) / 64);
+        // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
         self.vkd.cmdDispatch(command_buffer, @intCast(workgroups), 1, 1);
         self.vkd.endCommandBuffer(command_buffer) catch return error.CommandBufferEndFailed;
 
-        self.vkd.queueSubmit(self.compute_queue, 1, @ptrCast(&vk.SubmitInfo{
-            .wait_semaphore_count = 0,
-            .p_wait_semaphores = undefined,
-            .p_wait_dst_stage_mask = undefined,
-            .command_buffer_count = 1,
-            .p_command_buffers = @ptrCast(&command_buffer),
-            .signal_semaphore_count = 0,
-            .p_signal_semaphores = undefined,
-        }), self.fence) catch return error.QueueSubmitFailed;
-        _ = self.vkd.waitForFences(self.device, 1, @ptrCast(&self.fence), .true, std.math.maxInt(u64)) catch return error.FenceWaitFailed;
-        self.vkd.resetFences(self.device, 1, @ptrCast(&self.fence)) catch return error.FenceResetFailed;
+        self.vkd.queueSubmit(self.compute_queue, 1, // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+            @ptrCast(&vk.SubmitInfo{
+                .wait_semaphore_count = 0,
+                .p_wait_semaphores = undefined,
+                .p_wait_dst_stage_mask = undefined,
+                .command_buffer_count = 1,
+                .p_command_buffers = // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+                @ptrCast(&command_buffer),
+                .signal_semaphore_count = 0,
+                .p_signal_semaphores = undefined,
+            }), self.fence) catch return error.QueueSubmitFailed;
+        _ = self.vkd.waitForFences(self.device, 1, // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+            @ptrCast(&self.fence), .true, std.math.maxInt(u64)) catch return error.FenceWaitFailed;
+        self.vkd.resetFences(self.device, 1, // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+            @ptrCast(&self.fence)) catch return error.FenceResetFailed;
 
         const match_count = counters_ptr[0];
 
         const num_to_copy = @min(match_count, MAX_RESULTS);
         const matches = try allocator.alloc(AwkMatchResult, num_to_copy);
-        if (num_to_copy > 0) @memcpy(matches, @as([*]AwkMatchResult, @ptrCast(@alignCast(results_buffer.mapped)))[0..num_to_copy]);
+        if (num_to_copy > 0) safe.SimdUtils.copy(matches, @as([*]AwkMatchResult, @ptrCast(@alignCast(results_buffer.mapped)))[0..num_to_copy]);
 
         self.vkd.resetDescriptorPool(self.device, self.descriptor_pool, .{}) catch {};
 
         // Field splitting on CPU and update field_count for NF support
         var fields: std.ArrayListUnmanaged(FieldInfo) = .{};
+        // safe-transpile: for with index access requires manual review
         for (matches, 0..) |*match, idx| {
             const line = text[match.line_start..match.line_end];
             var field_idx: u32 = 1;
             var field_start: u32 = 0;
             var in_field = false;
 
+            // safe-transpile: for with index access requires manual review
             for (line, 0..) |c, i| {
                 var is_sep = false;
                 for (options.field_separator) |s| {
@@ -455,12 +523,15 @@ pub const VulkanAwk = struct {
 
                 if (!is_sep and !in_field) {
                     in_field = true;
+                    // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                     field_start = @intCast(i);
                 } else if (is_sep and in_field) {
                     try fields.append(allocator, .{
+                        // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                         .line_idx = @intCast(idx),
                         .field_idx = field_idx,
                         .start_offset = field_start,
+                        // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                         .end_offset = @intCast(i),
                     });
                     field_idx += 1;
@@ -470,9 +541,11 @@ pub const VulkanAwk = struct {
 
             if (in_field) {
                 try fields.append(allocator, .{
+                    // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                     .line_idx = @intCast(idx),
                     .field_idx = field_idx,
                     .start_offset = field_start,
+                    // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                     .end_offset = @intCast(line.len),
                 });
                 field_idx += 1;
@@ -486,12 +559,14 @@ pub const VulkanAwk = struct {
             .matches = matches,
             .fields = try fields.toOwnedSlice(allocator),
             .total_matches = match_count,
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             .total_lines = @intCast(num_lines),
             .allocator = allocator,
         };
     }
 
     /// GPU-accelerated regex pattern matching
+    // safe-transpile: function uses raw slice parameter — consider safe.String
     pub fn processAwkRegex(self: *Self, text: []const u8, pattern: []const u8, options: AwkOptions, allocator: std.mem.Allocator) !AwkResult {
         if (text.len > MAX_GPU_BUFFER_SIZE) return error.TextTooLarge;
 
@@ -508,15 +583,20 @@ pub const VulkanAwk = struct {
         defer line_lengths.deinit(allocator);
 
         var line_start: usize = 0;
+        // safe-transpile: for with index access requires manual review
         for (text, 0..) |c, i| {
             if (c == '\n') {
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 try line_offsets.append(allocator, @intCast(line_start));
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 try line_lengths.append(allocator, @intCast(i - line_start));
                 line_start = i + 1;
             }
         }
         if (line_start < text.len) {
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             try line_offsets.append(allocator, @intCast(line_start));
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             try line_lengths.append(allocator, @intCast(text.len - line_start));
         }
 
@@ -532,18 +612,22 @@ pub const VulkanAwk = struct {
         }
 
         // Create text buffer
+        // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
         const text_size: vk.DeviceSize = @intCast(((text.len + 3) / 4) * 4);
         const text_buffer = try self.createBuffer(text_size);
         defer self.destroyBuffer(text_buffer);
-        @memcpy(@as([*]u8, @ptrCast(text_buffer.mapped))[0..text.len], text);
+        safe.SimdUtils.copy(@as([*]u8, @ptrCast(text_buffer.mapped))[0..text.len], text);
 
         // Create states buffer (packed as 3 x u32 per state)
         const states_words = gpu_regex.states.len * 3;
+        // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
         const states_size: vk.DeviceSize = @intCast(@max(states_words * @sizeOf(u32), 4));
         const states_buffer = try self.createBuffer(states_size);
         defer self.destroyBuffer(states_buffer);
         if (states_words > 0) {
-            const states_ptr: [*]u32 = @ptrCast(@alignCast(states_buffer.mapped));
+            const states_ptr: [*]u32 = // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+                @ptrCast(@alignCast(states_buffer.mapped));
+            // safe-transpile: for with index access requires manual review
             for (gpu_regex.states, 0..) |state, i| {
                 const base = i * 3;
                 // Word 0: [type:8][flags:8][out:16]
@@ -560,27 +644,32 @@ pub const VulkanAwk = struct {
         }
 
         // Create bitmaps buffer
+        // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
         const bitmaps_size: vk.DeviceSize = @intCast(@max(gpu_regex.bitmaps.len * @sizeOf(u32), 4));
         const bitmaps_buffer = try self.createBuffer(bitmaps_size);
         defer self.destroyBuffer(bitmaps_buffer);
         if (gpu_regex.bitmaps.len > 0) {
-            @memcpy(@as([*]u32, @ptrCast(@alignCast(bitmaps_buffer.mapped)))[0..gpu_regex.bitmaps.len], gpu_regex.bitmaps);
+            safe.SimdUtils.copy(@as([*]u32, @ptrCast(@alignCast(bitmaps_buffer.mapped)))[0..gpu_regex.bitmaps.len], gpu_regex.bitmaps);
         }
 
         // Create config buffer
         const config_buffer = try self.createBuffer(@sizeOf(AwkRegexConfig));
         defer self.destroyBuffer(config_buffer);
-        @as(*AwkRegexConfig, @ptrCast(@alignCast(config_buffer.mapped))).* = AwkRegexConfig{
+        @as(*AwkRegexConfig, // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+            @ptrCast(@alignCast(config_buffer.mapped))).* = AwkRegexConfig{
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             .text_len = @intCast(text.len),
             .num_states = gpu_regex.header.num_states,
             .start_state = gpu_regex.header.start_state,
             .header_flags = gpu_regex.header.flags,
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             .num_bitmaps = @intCast(gpu_regex.bitmaps.len / 8),
             .max_results = MAX_RESULTS,
             .flags = options.toFlags(),
         };
 
         // Create results buffer
+        // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
         const results_size: vk.DeviceSize = @intCast(@sizeOf(AwkMatchResult) * MAX_RESULTS);
         const results_buffer = try self.createBuffer(results_size);
         defer self.destroyBuffer(results_buffer);
@@ -588,24 +677,33 @@ pub const VulkanAwk = struct {
         // Create counters buffer
         const counters_buffer = try self.createBuffer(8);
         defer self.destroyBuffer(counters_buffer);
-        const counters_ptr: *[2]u32 = @ptrCast(@alignCast(counters_buffer.mapped));
+        const counters_ptr: *[2]u32 = // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+            @ptrCast(@alignCast(counters_buffer.mapped));
         counters_ptr[0] = 0;
         counters_ptr[1] = 0;
 
         // Create line offsets/lengths buffers
+        // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
         const line_offsets_size: vk.DeviceSize = @intCast(line_offsets.items.len * @sizeOf(u32));
         const line_offsets_buffer = try self.createBuffer(line_offsets_size);
         defer self.destroyBuffer(line_offsets_buffer);
-        @memcpy(@as([*]u32, @ptrCast(@alignCast(line_offsets_buffer.mapped)))[0..line_offsets.items.len], line_offsets.items);
+        safe.SimdUtils.copy(@as([*]u32, @ptrCast(@alignCast(line_offsets_buffer.mapped)))[0..line_offsets.items.len], line_offsets.items);
 
+        // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
         const line_lengths_size: vk.DeviceSize = @intCast(line_lengths.items.len * @sizeOf(u32));
         const line_lengths_buffer = try self.createBuffer(line_lengths_size);
         defer self.destroyBuffer(line_lengths_buffer);
-        @memcpy(@as([*]u32, @ptrCast(@alignCast(line_lengths_buffer.mapped)))[0..line_lengths.items.len], line_lengths.items);
+        safe.SimdUtils.copy(@as([*]u32, @ptrCast(@alignCast(line_lengths_buffer.mapped)))[0..line_lengths.items.len], line_lengths.items);
 
         // Set up descriptor set
-        var descriptor_set: vk.DescriptorSet = undefined;
-        self.vkd.allocateDescriptorSets(self.device, &.{ .descriptor_pool = self.descriptor_pool, .descriptor_set_count = 1, .p_set_layouts = @ptrCast(&self.descriptor_set_layout) }, @ptrCast(&descriptor_set)) catch return error.DescriptorSetAllocationFailed;
+        var descriptor_set: vk.DescriptorSet = std.mem.zeroes(vk.DescriptorSet);
+        self.vkd.allocateDescriptorSets(self.device, &.{
+            .descriptor_pool = self.descriptor_pool,
+            .descriptor_set_count = 1,
+            .p_set_layouts = // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+            @ptrCast(&self.descriptor_set_layout),
+        }, // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+            @ptrCast(&descriptor_set)) catch return error.DescriptorSetAllocationFailed;
 
         const buffer_infos = [_]vk.DescriptorBufferInfo{
             .{ .buffer = text_buffer.buffer, .offset = 0, .range = text_size },
@@ -618,62 +716,74 @@ pub const VulkanAwk = struct {
             .{ .buffer = line_lengths_buffer.buffer, .offset = 0, .range = line_lengths_size },
         };
 
-        var writes: [8]vk.WriteDescriptorSet = undefined;
+        var writes: [8]vk.WriteDescriptorSet = .{};
         for (0..8) |i| {
             writes[i] = .{
                 .dst_set = descriptor_set,
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 .dst_binding = @intCast(i),
                 .dst_array_element = 0,
                 .descriptor_count = 1,
                 .descriptor_type = .storage_buffer,
                 .p_image_info = undefined,
-                .p_buffer_info = @ptrCast(&buffer_infos[i]),
+                .p_buffer_info = // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+                @ptrCast(&buffer_infos[i]),
                 .p_texel_buffer_view = undefined,
             };
         }
         self.vkd.updateDescriptorSets(self.device, 8, &writes, 0, undefined);
 
         // Execute using regex pipeline
-        var command_buffer: vk.CommandBuffer = undefined;
-        self.vkd.allocateCommandBuffers(self.device, &.{ .command_pool = self.command_pool, .level = .primary, .command_buffer_count = 1 }, @ptrCast(&command_buffer)) catch return error.CommandBufferAllocationFailed;
-        defer self.vkd.freeCommandBuffers(self.device, self.command_pool, 1, @ptrCast(&command_buffer));
+        var command_buffer: vk.CommandBuffer = std.mem.zeroes(vk.CommandBuffer);
+        self.vkd.allocateCommandBuffers(self.device, &.{ .command_pool = self.command_pool, .level = .primary, .command_buffer_count = 1 }, // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+            @ptrCast(&command_buffer)) catch return error.CommandBufferAllocationFailed;
+        defer self.vkd.freeCommandBuffers(self.device, self.command_pool, 1, // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+            @ptrCast(&command_buffer));
 
         self.vkd.beginCommandBuffer(command_buffer, &.{ .flags = .{ .one_time_submit_bit = true } }) catch return error.CommandBufferBeginFailed;
         self.vkd.cmdBindPipeline(command_buffer, .compute, self.regex_compute_pipeline);
-        self.vkd.cmdBindDescriptorSets(command_buffer, .compute, self.pipeline_layout, 0, 1, @ptrCast(&descriptor_set), 0, undefined);
+        self.vkd.cmdBindDescriptorSets(command_buffer, .compute, self.pipeline_layout, 0, 1, // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+            @ptrCast(&descriptor_set), 0, undefined);
 
         const workgroups = @max(1, (num_lines + 63) / 64);
+        // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
         self.vkd.cmdDispatch(command_buffer, @intCast(workgroups), 1, 1);
         self.vkd.endCommandBuffer(command_buffer) catch return error.CommandBufferEndFailed;
 
-        self.vkd.queueSubmit(self.compute_queue, 1, @ptrCast(&vk.SubmitInfo{
-            .wait_semaphore_count = 0,
-            .p_wait_semaphores = undefined,
-            .p_wait_dst_stage_mask = undefined,
-            .command_buffer_count = 1,
-            .p_command_buffers = @ptrCast(&command_buffer),
-            .signal_semaphore_count = 0,
-            .p_signal_semaphores = undefined,
-        }), self.fence) catch return error.QueueSubmitFailed;
-        _ = self.vkd.waitForFences(self.device, 1, @ptrCast(&self.fence), .true, std.math.maxInt(u64)) catch return error.FenceWaitFailed;
-        self.vkd.resetFences(self.device, 1, @ptrCast(&self.fence)) catch return error.FenceResetFailed;
+        self.vkd.queueSubmit(self.compute_queue, 1, // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+            @ptrCast(&vk.SubmitInfo{
+                .wait_semaphore_count = 0,
+                .p_wait_semaphores = undefined,
+                .p_wait_dst_stage_mask = undefined,
+                .command_buffer_count = 1,
+                .p_command_buffers = // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+                @ptrCast(&command_buffer),
+                .signal_semaphore_count = 0,
+                .p_signal_semaphores = undefined,
+            }), self.fence) catch return error.QueueSubmitFailed;
+        _ = self.vkd.waitForFences(self.device, 1, // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+            @ptrCast(&self.fence), .true, std.math.maxInt(u64)) catch return error.FenceWaitFailed;
+        self.vkd.resetFences(self.device, 1, // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+            @ptrCast(&self.fence)) catch return error.FenceResetFailed;
 
         const match_count = counters_ptr[0];
 
         const num_to_copy = @min(match_count, MAX_RESULTS);
         const matches = try allocator.alloc(AwkMatchResult, num_to_copy);
-        if (num_to_copy > 0) @memcpy(matches, @as([*]AwkMatchResult, @ptrCast(@alignCast(results_buffer.mapped)))[0..num_to_copy]);
+        if (num_to_copy > 0) safe.SimdUtils.copy(matches, @as([*]AwkMatchResult, @ptrCast(@alignCast(results_buffer.mapped)))[0..num_to_copy]);
 
         self.vkd.resetDescriptorPool(self.device, self.descriptor_pool, .{}) catch {};
 
         // Field splitting on CPU and update field_count for NF support
         var fields: std.ArrayListUnmanaged(FieldInfo) = .{};
+        // safe-transpile: for with index access requires manual review
         for (matches, 0..) |*match, idx| {
             const line = text[match.line_start..match.line_end];
             var field_idx: u32 = 1;
             var field_start: u32 = 0;
             var in_field = false;
 
+            // safe-transpile: for with index access requires manual review
             for (line, 0..) |c, i| {
                 var is_sep = false;
                 for (options.field_separator) |s| {
@@ -685,12 +795,15 @@ pub const VulkanAwk = struct {
 
                 if (!is_sep and !in_field) {
                     in_field = true;
+                    // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                     field_start = @intCast(i);
                 } else if (is_sep and in_field) {
                     try fields.append(allocator, .{
+                        // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                         .line_idx = @intCast(idx),
                         .field_idx = field_idx,
                         .start_offset = field_start,
+                        // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                         .end_offset = @intCast(i),
                     });
                     field_idx += 1;
@@ -700,9 +813,11 @@ pub const VulkanAwk = struct {
 
             if (in_field) {
                 try fields.append(allocator, .{
+                    // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                     .line_idx = @intCast(idx),
                     .field_idx = field_idx,
                     .start_offset = field_start,
+                    // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                     .end_offset = @intCast(line.len),
                 });
                 field_idx += 1;
@@ -716,6 +831,7 @@ pub const VulkanAwk = struct {
             .matches = matches,
             .fields = try fields.toOwnedSlice(allocator),
             .total_matches = match_count,
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             .total_lines = @intCast(num_lines),
             .allocator = allocator,
         };
@@ -724,9 +840,11 @@ pub const VulkanAwk = struct {
 
 fn findMemoryType(mem_props: *const vk.PhysicalDeviceMemoryProperties, type_filter: u32, properties: vk.MemoryPropertyFlags) ?u32 {
     for (0..mem_props.memory_type_count) |i| {
+        // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
         const idx: u5 = @intCast(i);
         if ((type_filter & (@as(u32, 1) << idx)) != 0) {
             const mem_type = mem_props.memory_types[i];
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             if (mem_type.property_flags.host_visible_bit == properties.host_visible_bit and mem_type.property_flags.host_coherent_bit == properties.host_coherent_bit) return @intCast(i);
         }
     }

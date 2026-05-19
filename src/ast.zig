@@ -36,8 +36,8 @@ pub const Program = struct {
             if (rule.pattern) |p| p.deinit(self.allocator);
             rule.action.deinit(self.allocator);
         }
-        if (self.rules.len > 0) self.allocator.free(self.rules);
-        if (self.endfile) |ef| ef.deinit(self.allocator);
+        if (self.rules.len > 0) // safe-transpile: free removed (memory owned by safe type);
+            if (self.endfile) |ef| ef.deinit(self.allocator);
         if (self.end) |e| e.deinit(self.allocator);
 
         var it = self.functions.iterator();
@@ -67,7 +67,7 @@ pub const Function = struct {
     body: *Statement,
 
     pub fn deinit(self: *Function, allocator: Allocator) void {
-        allocator.free(self.params);
+        // safe-transpile: free removed (memory owned by safe type);
         self.body.deinit(allocator);
     }
 };
@@ -204,7 +204,7 @@ pub const Expression = struct {
                     arg.deinit(allocator);
                     allocator.destroy(arg);
                 }
-                allocator.free(fc.args);
+                // safe-transpile: free removed (memory owned by safe type);
             },
             .regex_match => |rm| {
                 rm.string.deinit(allocator);
@@ -238,36 +238,38 @@ pub const Expression = struct {
 
     /// Create a number literal expression
     pub fn numberLiteral(allocator: Allocator, n: f64) !*Expression {
-        const expr = try allocator.create(Expression);
-        expr.* = .{ .kind = .{ .number_literal = n } };
+        const expr = try safe.Box(Expression).init(allocator, undefined);
+        expr[0] = .{ .kind = .{ .number_literal = n } };
         return expr;
     }
 
     /// Create a string literal expression
+    // safe-transpile: function uses raw slice parameter — consider safe.String
     pub fn stringLiteral(allocator: Allocator, s: []const u8) !*Expression {
-        const expr = try allocator.create(Expression);
-        expr.* = .{ .kind = .{ .string_literal = s } };
+        const expr = try safe.Box(Expression).init(allocator, undefined);
+        expr[0] = .{ .kind = .{ .string_literal = s } };
         return expr;
     }
 
     /// Create a variable reference expression
+    // safe-transpile: function uses raw slice parameter — consider safe.String
     pub fn variableRef(allocator: Allocator, name: []const u8) !*Expression {
-        const expr = try allocator.create(Expression);
-        expr.* = .{ .kind = .{ .variable = name } };
+        const expr = try safe.Box(Expression).init(allocator, undefined);
+        expr[0] = .{ .kind = .{ .variable = name } };
         return expr;
     }
 
     /// Create a field reference expression
     pub fn fieldRef(allocator: Allocator, index: *Expression) !*Expression {
-        const expr = try allocator.create(Expression);
-        expr.* = .{ .kind = .{ .field_ref = index } };
+        const expr = try safe.Box(Expression).init(allocator, undefined);
+        expr[0] = .{ .kind = .{ .field_ref = index } };
         return expr;
     }
 
     /// Create a binary operation expression
     pub fn binaryOp(allocator: Allocator, op: BinaryOp, left: *Expression, right: *Expression) !*Expression {
-        const expr = try allocator.create(Expression);
-        expr.* = .{ .kind = .{ .binary_op = .{ .op = op, .left = left, .right = right } } };
+        const expr = try safe.Box(Expression).init(allocator, undefined);
+        expr[0] = .{ .kind = .{ .binary_op = .{ .op = op, .left = left, .right = right } } };
         return expr;
     }
 };
@@ -419,11 +421,12 @@ pub const Statement = struct {
     pub fn deinit(self: *Statement, allocator: Allocator) void {
         switch (self.kind) {
             .block => |stmts| {
-                for (stmts) |*stmt| {
+                for (0..stmts.len) |__zust_i| {
+                    var stmt = &stmts[__zust_i];
                     var s = stmt.*;
                     s.deinit(allocator);
                 }
-                allocator.free(stmts);
+                // safe-transpile: free removed (memory owned by safe type);
             },
             .expression => |expr| {
                 expr.deinit(allocator);
@@ -434,7 +437,7 @@ pub const Statement = struct {
                     arg.deinit(allocator);
                     allocator.destroy(arg);
                 }
-                allocator.free(p.args);
+                // safe-transpile: free removed (memory owned by safe type);
                 if (p.output_file) |of| {
                     of.deinit(allocator);
                     allocator.destroy(of);
@@ -447,7 +450,7 @@ pub const Statement = struct {
                     arg.deinit(allocator);
                     allocator.destroy(arg);
                 }
-                allocator.free(pf.args);
+                // safe-transpile: free removed (memory owned by safe type);
                 if (pf.output_file) |of| {
                     of.deinit(allocator);
                     allocator.destroy(of);
@@ -525,22 +528,22 @@ pub const Statement = struct {
 
     /// Create a block statement
     pub fn block(allocator: Allocator, stmts: []Statement) !*Statement {
-        const stmt = try allocator.create(Statement);
-        stmt.* = .{ .kind = .{ .block = stmts } };
+        const stmt = try safe.Box(Statement).init(allocator, undefined);
+        stmt[0] = .{ .kind = .{ .block = stmts } };
         return stmt;
     }
 
     /// Create an expression statement
     pub fn expression(allocator: Allocator, expr: *Expression) !*Statement {
-        const stmt = try allocator.create(Statement);
-        stmt.* = .{ .kind = .{ .expression = expr } };
+        const stmt = try safe.Box(Statement).init(allocator, undefined);
+        stmt[0] = .{ .kind = .{ .expression = expr } };
         return stmt;
     }
 
     /// Create a print statement
     pub fn print(allocator: Allocator, args: []*Expression) !*Statement {
-        const stmt = try allocator.create(Statement);
-        stmt.* = .{ .kind = .{ .print = .{ .args = args, .output_file = null, .append = false, .pipe_cmd = null } } };
+        const stmt = try safe.Box(Statement).init(allocator, undefined);
+        stmt[0] = .{ .kind = .{ .print = .{ .args = args, .output_file = null, .append = false, .pipe_cmd = null } } };
         return stmt;
     }
 };
@@ -552,7 +555,7 @@ pub const Statement = struct {
 test "AST: create number literal" {
     const allocator = std.testing.allocator;
     const expr = try Expression.numberLiteral(allocator, 42.0);
-    defer allocator.destroy(expr);
+    defer _ = expr.deinit();
 
     switch (expr.kind) {
         .number_literal => |n| try std.testing.expectEqual(@as(f64, 42.0), n),

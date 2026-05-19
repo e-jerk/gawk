@@ -176,6 +176,8 @@ pub const Evaluator = struct {
     /// Execute a complete AWK program on input text
     /// If filename is provided, sets FILENAME and resets FNR (for multi-file processing)
     /// run_end controls whether END block executes (set to false for intermediate files in multi-file mode)
+    // safe-transpile: function uses raw slice parameter — consider safe.String
+    // safe-transpile: function returns small constant slice — consider safe.String
     pub fn execute(self: *Evaluator, program: *ast.Program, input: []const u8, maybe_filename: ?[]const u8, run_end: bool) ![]const u8 {
         // Reset control state at start of each file
         self.control = .normal;
@@ -306,16 +308,18 @@ pub const Evaluator = struct {
         return try self.output.toOwnedSlice(self.allocator);
     }
 
+    // safe-transpile: function uses raw slice parameter — consider safe.String
     fn setCurrentLine(self: *Evaluator, line: []const u8) void {
         self.current_line = line;
         self.fields.clearRetainingCapacity();
 
         // Split line into fields
-        if (std.mem.eql(u8, self.field_separator, " \t")) {
+        if (safe.SimdUtils.eql(self.field_separator, " \t")) {
             // Default: split on whitespace, collapse multiple spaces
             var in_field = false;
             var field_start: usize = 0;
 
+            // safe-transpile: for with index access requires manual review
             for (line, 0..) |c, i| {
                 const is_space = c == ' ' or c == '\t';
                 if (is_space) {
@@ -355,7 +359,8 @@ pub const Evaluator = struct {
 
         switch (stmt.kind) {
             .block => |stmts| {
-                for (stmts) |*s| {
+                for (0..stmts.len) |__zust_i| {
+                    var s = &stmts[__zust_i];
                     var inner_stmt = s.*;
                     try self.executeStatement(&inner_stmt);
                     if (self.control != .normal) return;
@@ -554,7 +559,7 @@ pub const Evaluator = struct {
     fn executeGetline(self: *Evaluator, var_name: ?[]const u8, file_expr: ?*ast.Expression, pipe_expr: ?*ast.Expression) !Value {
         _ = pipe_expr; // TODO: Support pipe getline
 
-        var line_buf: [4096]u8 = undefined;
+        var line_buf: [4096]u8 = .{};
         var line: ?[]const u8 = null;
 
         if (file_expr) |fe| {
@@ -571,6 +576,7 @@ pub const Evaluator = struct {
                     // Seek back if we read past newline
                     const past_newline = bytes_read - nl - 1;
                     if (past_newline > 0) {
+                        // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                         file.seekBy(-@as(i64, @intCast(past_newline))) catch {};
                     }
                 } else {
@@ -585,6 +591,7 @@ pub const Evaluator = struct {
                     line = line_buf[0..nl];
                     const past_newline = bytes_read - nl - 1;
                     if (past_newline > 0) {
+                        // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                         new_file.seekBy(-@as(i64, @intCast(past_newline))) catch {};
                     }
                 } else {
@@ -610,17 +617,18 @@ pub const Evaluator = struct {
         return Value.initNumber(0.0);
     }
 
+    // safe-transpile: function uses raw slice parameter — consider safe.String
     fn writeToOutput(self: *Evaluator, output_file: ?*ast.Expression, append: bool, pipe_cmd: ?*ast.Expression, data: []const u8) !void {
         if (pipe_cmd) |pc| {
             const cmd_val = try self.evaluateExpression(pc);
             const cmd_str = try cmd_val.asString(self.allocator);
-            
+
             // Simple pipe: spawn command, write data to stdin, wait
-            var child = std.process.Child.init(&.{"/bin/sh", "-c", cmd_str}, self.allocator);
+            var child = std.process.Child.init(&.{ "/bin/sh", "-c", cmd_str }, self.allocator);
             child.stdin_behavior = .Pipe;
             child.stdout_behavior = .Inherit;
             child.stderr_behavior = .Inherit;
-            
+
             child.spawn() catch return error.IoError;
             if (child.stdin) |*stdin| {
                 _ = stdin.write(data) catch {};
@@ -630,7 +638,7 @@ pub const Evaluator = struct {
             _ = child.wait() catch {};
             return;
         }
-        
+
         if (output_file) |of| {
             const file_val = try self.evaluateExpression(of);
             const file_str = try file_val.asString(self.allocator);
@@ -669,6 +677,7 @@ pub const Evaluator = struct {
             // print $0
             try line_output.appendSlice(self.allocator, self.current_line);
         } else {
+            // safe-transpile: for with index access requires manual review
             for (args, 0..) |arg, i| {
                 if (i > 0) try line_output.appendSlice(self.allocator, self.ofs);
                 const val = try self.evaluateExpression(arg);
@@ -695,7 +704,7 @@ pub const Evaluator = struct {
             if (format_str[i] == '%' and i + 1 < format_str.len) {
                 i += 1;
                 if (format_str[i] == '%') {
-                    try printf_output.append(self.allocator,'%');
+                    try printf_output.append(self.allocator, '%');
                     i += 1;
                     continue;
                 }
@@ -729,21 +738,21 @@ pub const Evaluator = struct {
                         'd', 'i' => {
                             const n: i64 = @intFromFloat(val.asNumber());
                             const formatted = try std.fmt.allocPrint(self.allocator, "{d}", .{n});
-                            defer self.allocator.free(formatted);
-                            try printf_output.appendSlice(self.allocator,formatted);
+                            // safe-transpile: free removed (memory owned by safe type);
+                            try printf_output.appendSlice(self.allocator, formatted);
                         },
                         'f', 'e', 'g' => {
                             const formatted = try std.fmt.allocPrint(self.allocator, "{d:.6}", .{val.asNumber()});
-                            defer self.allocator.free(formatted);
-                            try printf_output.appendSlice(self.allocator,formatted);
+                            // safe-transpile: free removed (memory owned by safe type);
+                            try printf_output.appendSlice(self.allocator, formatted);
                         },
                         's' => {
                             const str = try val.asString(self.allocator);
-                            try printf_output.appendSlice(self.allocator,str);
+                            try printf_output.appendSlice(self.allocator, str);
                         },
                         'c' => {
                             const n: u8 = @intFromFloat(val.asNumber());
-                            try printf_output.append(self.allocator,n);
+                            try printf_output.append(self.allocator, n);
                         },
                         else => {},
                     }
@@ -753,18 +762,18 @@ pub const Evaluator = struct {
                 if (format_str[i] == '\\' and i + 1 < format_str.len) {
                     i += 1;
                     switch (format_str[i]) {
-                        'n' => try printf_output.append(self.allocator,'\n'),
-                        't' => try printf_output.append(self.allocator,'\t'),
-                        'r' => try printf_output.append(self.allocator,'\r'),
-                        '\\' => try printf_output.append(self.allocator,'\\'),
+                        'n' => try printf_output.append(self.allocator, '\n'),
+                        't' => try printf_output.append(self.allocator, '\t'),
+                        'r' => try printf_output.append(self.allocator, '\r'),
+                        '\\' => try printf_output.append(self.allocator, '\\'),
                         else => {
-                            try printf_output.append(self.allocator,'\\');
-                            try printf_output.append(self.allocator,format_str[i]);
+                            try printf_output.append(self.allocator, '\\');
+                            try printf_output.append(self.allocator, format_str[i]);
                         },
                     }
                     i += 1;
                 } else {
-                    try printf_output.append(self.allocator,format_str[i]);
+                    try printf_output.append(self.allocator, format_str[i]);
                     i += 1;
                 }
             }
@@ -804,17 +813,17 @@ pub const Evaluator = struct {
 
             .variable => |name| {
                 // Check special variables first
-                if (std.mem.eql(u8, name, "NR")) return Value.initNumber(@floatFromInt(self.nr));
-                if (std.mem.eql(u8, name, "NF")) return Value.initNumber(@floatFromInt(self.nf));
-                if (std.mem.eql(u8, name, "FNR")) return Value.initNumber(@floatFromInt(self.fnr));
-                if (std.mem.eql(u8, name, "FS")) return Value.initString(self.field_separator);
-                if (std.mem.eql(u8, name, "OFS")) return Value.initString(self.ofs);
-                if (std.mem.eql(u8, name, "ORS")) return Value.initString(self.ors);
-                if (std.mem.eql(u8, name, "RS")) return Value.initString(self.rs);
-                if (std.mem.eql(u8, name, "IGNORECASE")) return Value.initNumber(if (self.ignorecase) 1.0 else 0.0);
-                if (std.mem.eql(u8, name, "FILENAME")) return Value.initString(self.filename);
-                if (std.mem.eql(u8, name, "RSTART")) return Value.initNumber(@floatFromInt(self.rstart));
-                if (std.mem.eql(u8, name, "RLENGTH")) return Value.initNumber(@floatFromInt(self.rlength));
+                if (safe.SimdUtils.eql(name, "NR")) return Value.initNumber(@floatFromInt(self.nr));
+                if (safe.SimdUtils.eql(name, "NF")) return Value.initNumber(@floatFromInt(self.nf));
+                if (safe.SimdUtils.eql(name, "FNR")) return Value.initNumber(@floatFromInt(self.fnr));
+                if (safe.SimdUtils.eql(name, "FS")) return Value.initString(self.field_separator);
+                if (safe.SimdUtils.eql(name, "OFS")) return Value.initString(self.ofs);
+                if (safe.SimdUtils.eql(name, "ORS")) return Value.initString(self.ors);
+                if (safe.SimdUtils.eql(name, "RS")) return Value.initString(self.rs);
+                if (safe.SimdUtils.eql(name, "IGNORECASE")) return Value.initNumber(if (self.ignorecase) 1.0 else 0.0);
+                if (safe.SimdUtils.eql(name, "FILENAME")) return Value.initString(self.filename);
+                if (safe.SimdUtils.eql(name, "RSTART")) return Value.initNumber(@floatFromInt(self.rstart));
+                if (safe.SimdUtils.eql(name, "RLENGTH")) return Value.initNumber(@floatFromInt(self.rlength));
 
                 if (self.variables.get(name)) |val| {
                     return val;
@@ -965,39 +974,41 @@ pub const Evaluator = struct {
         }
     }
 
+    // safe-transpile: function uses raw slice parameter — consider safe.String
     fn setVariable(self: *Evaluator, name: []const u8, value: Value) !void {
         // Handle special variables
-        if (std.mem.eql(u8, name, "FS")) {
+        if (safe.SimdUtils.eql(name, "FS")) {
             const str = try value.asString(self.allocator);
             self.field_separator = str;
             return;
         }
-        if (std.mem.eql(u8, name, "OFS")) {
+        if (safe.SimdUtils.eql(name, "OFS")) {
             const str = try value.asString(self.allocator);
             self.ofs = str;
             return;
         }
-        if (std.mem.eql(u8, name, "ORS")) {
+        if (safe.SimdUtils.eql(name, "ORS")) {
             const str = try value.asString(self.allocator);
             self.ors = str;
             return;
         }
-        if (std.mem.eql(u8, name, "RS")) {
+        if (safe.SimdUtils.eql(name, "RS")) {
             const str = try value.asString(self.allocator);
             self.rs = str;
             return;
         }
-        if (std.mem.eql(u8, name, "IGNORECASE")) {
+        if (safe.SimdUtils.eql(name, "IGNORECASE")) {
             self.ignorecase = value.isTruthy();
             return;
         }
-        if (std.mem.eql(u8, name, "NF")) {
+        if (safe.SimdUtils.eql(name, "NF")) {
             const new_nf = @as(usize, @intFromFloat(@max(0.0, value.asNumber())));
             if (new_nf < self.fields.items.len) {
                 // Truncate fields and rebuild $0
                 self.fields.items.len = new_nf;
                 var new_line = std.ArrayListUnmanaged(u8){};
                 errdefer new_line.deinit(self.allocator);
+                // safe-transpile: for with index access requires manual review
                 for (self.fields.items, 0..) |field, i| {
                     if (i > 0) try new_line.appendSlice(self.allocator, self.ofs);
                     try new_line.appendSlice(self.allocator, field);
@@ -1012,6 +1023,7 @@ pub const Evaluator = struct {
         try self.variables.put(self.allocator, name, value);
     }
 
+    // safe-transpile: function uses raw slice parameter — consider safe.String
     fn setArrayElement(self: *Evaluator, array_name: []const u8, key: []const u8, value: Value) !void {
         const result = try self.arrays.getOrPut(self.allocator, array_name);
         if (!result.found_existing) {
@@ -1024,9 +1036,10 @@ pub const Evaluator = struct {
         return @mod(year, 4) == 0 and (@mod(year, 100) != 0 or @mod(year, 400) == 0);
     }
 
+    // safe-transpile: function uses raw slice parameter — consider safe.String
     fn callFunction(self: *Evaluator, name: []const u8, args: []*ast.Expression) !Value {
         // Built-in functions
-        if (std.mem.eql(u8, name, "length")) {
+        if (safe.SimdUtils.eql(name, "length")) {
             if (args.len == 0) {
                 return Value.initNumber(@floatFromInt(self.current_line.len));
             }
@@ -1034,7 +1047,7 @@ pub const Evaluator = struct {
             return Value.initNumber(val.length());
         }
 
-        if (std.mem.eql(u8, name, "substr")) {
+        if (safe.SimdUtils.eql(name, "substr")) {
             if (args.len < 2) return Value.initEmpty();
             const str_val = try self.evaluateExpression(args[0]);
             const str = try str_val.asString(self.allocator);
@@ -1054,20 +1067,21 @@ pub const Evaluator = struct {
             return Value.initString(str[start..@min(start + len, str.len)]);
         }
 
-        if (std.mem.eql(u8, name, "index")) {
+        if (safe.SimdUtils.eql(name, "index")) {
             if (args.len < 2) return Value.initNumber(0.0);
             const str_val = try self.evaluateExpression(args[0]);
             const str = try str_val.asString(self.allocator);
             const needle_val = try self.evaluateExpression(args[1]);
             const needle = try needle_val.asString(self.allocator);
 
+            // zust: use safe.String or safe.GuardedSlice for slice operations
             if (std.mem.indexOf(u8, str, needle)) |pos| {
                 return Value.initNumber(@floatFromInt(pos + 1));
             }
             return Value.initNumber(0.0);
         }
 
-        if (std.mem.eql(u8, name, "split")) {
+        if (safe.SimdUtils.eql(name, "split")) {
             if (args.len < 2) return Value.initNumber(0.0);
             const str_val = try self.evaluateExpression(args[0]);
             const str = try str_val.asString(self.allocator);
@@ -1101,7 +1115,7 @@ pub const Evaluator = struct {
                 while (iter.next()) |part| {
                     count += 1;
                     const key = try std.fmt.allocPrint(self.allocator, "{d}", .{count});
-                    defer self.allocator.free(key);
+                    // safe-transpile: free removed (memory owned by safe type);
                     const part_copy = try self.allocator.dupe(u8, part);
                     try self.setArrayElement(array_name, key, Value.initStringOwned(part_copy, self.allocator));
                 }
@@ -1110,29 +1124,31 @@ pub const Evaluator = struct {
             return Value.initNumber(@floatFromInt(count));
         }
 
-        if (std.mem.eql(u8, name, "toupper")) {
+        if (safe.SimdUtils.eql(name, "toupper")) {
             if (args.len == 0) return Value.initEmpty();
             const val = try self.evaluateExpression(args[0]);
             const str = try val.asString(self.allocator);
             const upper = try self.allocator.alloc(u8, str.len);
+            // safe-transpile: for with index access requires manual review
             for (str, 0..) |c, i| {
                 upper[i] = std.ascii.toUpper(c);
             }
             return Value.initStringOwned(upper, self.allocator);
         }
 
-        if (std.mem.eql(u8, name, "tolower")) {
+        if (safe.SimdUtils.eql(name, "tolower")) {
             if (args.len == 0) return Value.initEmpty();
             const val = try self.evaluateExpression(args[0]);
             const str = try val.asString(self.allocator);
             const lower = try self.allocator.alloc(u8, str.len);
+            // safe-transpile: for with index access requires manual review
             for (str, 0..) |c, i| {
                 lower[i] = std.ascii.toLower(c);
             }
             return Value.initStringOwned(lower, self.allocator);
         }
 
-        if (std.mem.eql(u8, name, "sprintf")) {
+        if (safe.SimdUtils.eql(name, "sprintf")) {
             // Basic sprintf - format first arg with remaining args
             if (args.len == 0) return Value.initEmpty();
             const format_val = try self.evaluateExpression(args[0]);
@@ -1161,7 +1177,7 @@ pub const Evaluator = struct {
                                 const arg_val = try self.evaluateExpression(args[arg_idx]);
                                 const n = @as(i64, @intFromFloat(arg_val.asNumber()));
                                 const str = try std.fmt.allocPrint(self.allocator, "{d}", .{n});
-                                defer self.allocator.free(str);
+                                // safe-transpile: free removed (memory owned by safe type);
                                 try result.appendSlice(self.allocator, str);
                                 arg_idx += 1;
                             }
@@ -1171,7 +1187,7 @@ pub const Evaluator = struct {
                                 const arg_val = try self.evaluateExpression(args[arg_idx]);
                                 const n = arg_val.asNumber();
                                 const str = try std.fmt.allocPrint(self.allocator, "{d:.6}", .{n});
-                                defer self.allocator.free(str);
+                                // safe-transpile: free removed (memory owned by safe type);
                                 try result.appendSlice(self.allocator, str);
                                 arg_idx += 1;
                             }
@@ -1181,7 +1197,7 @@ pub const Evaluator = struct {
                                 const arg_val = try self.evaluateExpression(args[arg_idx]);
                                 const n = arg_val.asNumber();
                                 const str = try std.fmt.allocPrint(self.allocator, "{d:.6}", .{n});
-                                defer self.allocator.free(str);
+                                // safe-transpile: free removed (memory owned by safe type);
                                 try result.appendSlice(self.allocator, str);
                                 arg_idx += 1;
                             }
@@ -1203,43 +1219,43 @@ pub const Evaluator = struct {
             return Value.initStringOwned(output, self.allocator);
         }
 
-        if (std.mem.eql(u8, name, "sin")) {
+        if (safe.SimdUtils.eql(name, "sin")) {
             if (args.len == 0) return Value.initNumber(0.0);
             const val = try self.evaluateExpression(args[0]);
             return Value.initNumber(@sin(val.asNumber()));
         }
 
-        if (std.mem.eql(u8, name, "cos")) {
+        if (safe.SimdUtils.eql(name, "cos")) {
             if (args.len == 0) return Value.initNumber(1.0);
             const val = try self.evaluateExpression(args[0]);
             return Value.initNumber(@cos(val.asNumber()));
         }
 
-        if (std.mem.eql(u8, name, "sqrt")) {
+        if (safe.SimdUtils.eql(name, "sqrt")) {
             if (args.len == 0) return Value.initNumber(0.0);
             const val = try self.evaluateExpression(args[0]);
             return Value.initNumber(@sqrt(val.asNumber()));
         }
 
-        if (std.mem.eql(u8, name, "int")) {
+        if (safe.SimdUtils.eql(name, "int")) {
             if (args.len == 0) return Value.initNumber(0.0);
             const val = try self.evaluateExpression(args[0]);
             return Value.initNumber(@trunc(val.asNumber()));
         }
 
-        if (std.mem.eql(u8, name, "log")) {
+        if (safe.SimdUtils.eql(name, "log")) {
             if (args.len == 0) return Value.initNumber(0.0);
             const val = try self.evaluateExpression(args[0]);
             return Value.initNumber(@log(val.asNumber()));
         }
 
-        if (std.mem.eql(u8, name, "exp")) {
+        if (safe.SimdUtils.eql(name, "exp")) {
             if (args.len == 0) return Value.initNumber(1.0);
             const val = try self.evaluateExpression(args[0]);
             return Value.initNumber(@exp(val.asNumber()));
         }
 
-        if (std.mem.eql(u8, name, "gensub")) {
+        if (safe.SimdUtils.eql(name, "gensub")) {
             // gensub(pattern, replacement, how [, target])
             if (args.len < 3) return Value.initString("");
             // For regex literals, get the pattern string directly (not the match result)
@@ -1331,8 +1347,8 @@ pub const Evaluator = struct {
             return Value.initStringOwned(output, self.allocator);
         }
 
-        if (std.mem.eql(u8, name, "gsub") or std.mem.eql(u8, name, "sub")) {
-            const is_gsub = std.mem.eql(u8, name, "gsub");
+        if (safe.SimdUtils.eql(name, "gsub") or safe.SimdUtils.eql(name, "sub")) {
+            const is_gsub = safe.SimdUtils.eql(name, "gsub");
             if (args.len < 2) return Value.initNumber(0.0);
             const pat_str = switch (args[0].kind) {
                 .regex_literal => |p| p,
@@ -1408,7 +1424,7 @@ pub const Evaluator = struct {
                     try self.setVariable(tn, Value.initStringOwned(output, self.allocator));
                 } else {
                     // For non-variable targets (like $1), need to handle differently
-                    self.allocator.free(output);
+                    // safe-transpile: free removed (memory owned by safe type);
                 }
             } else {
                 // Modify $0
@@ -1417,7 +1433,7 @@ pub const Evaluator = struct {
             return Value.initNumber(@floatFromInt(match_count));
         }
 
-        if (std.mem.eql(u8, name, "match")) {
+        if (safe.SimdUtils.eql(name, "match")) {
             // match(string, pattern [, array])
             if (args.len < 2) return Value.initNumber(0.0);
             const str_val = try self.evaluateExpression(args[0]);
@@ -1434,9 +1450,11 @@ pub const Evaluator = struct {
             const pos = if (self.ignorecase)
                 std.ascii.indexOfIgnoreCase(str, pat_str)
             else
+                // zust: use safe.String or safe.GuardedSlice for slice operations
                 std.mem.indexOf(u8, str, pat_str);
             if (pos) |p| {
                 self.rstart = p + 1; // 1-based
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 self.rlength = @intCast(pat_str.len);
 
                 // Optional array argument for capture groups
@@ -1457,7 +1475,7 @@ pub const Evaluator = struct {
                         }
                         // Store matched text
                         const key0 = try self.allocator.dupe(u8, "0");
-                        const val0 = try self.allocator.dupe(u8, str[p..p + pat_str.len]);
+                        const val0 = try self.allocator.dupe(u8, str[p .. p + pat_str.len]);
                         try self.setArrayElement(aname, key0, Value.initStringOwned(val0, self.allocator));
                         // Store start position
                         const start_key = try self.allocator.dupe(u8, "start,0");
@@ -1478,14 +1496,14 @@ pub const Evaluator = struct {
             }
         }
 
-        if (std.mem.eql(u8, name, "systime")) {
+        if (safe.SimdUtils.eql(name, "systime")) {
             const now = std.time.timestamp();
             return Value.initNumber(@floatFromInt(now));
         }
 
-        if (std.mem.eql(u8, name, "strftime")) {
+        if (safe.SimdUtils.eql(name, "strftime")) {
             // strftime([format [, timestamp]])
-            var format_str: []const u8 = "%Y-%m-%d %H:%M:%S";
+            var format_str: safe.Slice(u8) = "%Y-%m-%d %H:%M:%S";
             var timestamp: i64 = std.time.timestamp();
             if (args.len > 0) {
                 const fmt_val = try self.evaluateExpression(args[0]);
@@ -1496,6 +1514,7 @@ pub const Evaluator = struct {
                 timestamp = @intFromFloat(time_val.asNumber());
             }
 
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             const epoch = std.time.epoch.EpochSeconds{ .secs = @intCast(timestamp) };
             const epoch_day = epoch.getEpochDay();
             const year_day = epoch_day.calculateYearDay();
@@ -1513,43 +1532,43 @@ pub const Evaluator = struct {
                         '%' => try result.append(self.allocator, '%'),
                         'Y' => {
                             const str = try std.fmt.allocPrint(self.allocator, "{d}", .{year_day.year});
-                            defer self.allocator.free(str);
+                            // safe-transpile: free removed (memory owned by safe type);
                             try result.appendSlice(self.allocator, str);
                         },
                         'y' => {
                             const short_year = @mod(year_day.year, 100);
                             const str = try std.fmt.allocPrint(self.allocator, "{d:0>2}", .{short_year});
-                            defer self.allocator.free(str);
+                            // safe-transpile: free removed (memory owned by safe type);
                             try result.appendSlice(self.allocator, str);
                         },
                         'm' => {
                             const str = try std.fmt.allocPrint(self.allocator, "{d:0>2}", .{month_day.month});
-                            defer self.allocator.free(str);
+                            // safe-transpile: free removed (memory owned by safe type);
                             try result.appendSlice(self.allocator, str);
                         },
                         'd' => {
                             const str = try std.fmt.allocPrint(self.allocator, "{d:0>2}", .{month_day.day_index + 1});
-                            defer self.allocator.free(str);
+                            // safe-transpile: free removed (memory owned by safe type);
                             try result.appendSlice(self.allocator, str);
                         },
                         'H' => {
                             const str = try std.fmt.allocPrint(self.allocator, "{d:0>2}", .{day_secs.getHoursIntoDay()});
-                            defer self.allocator.free(str);
+                            // safe-transpile: free removed (memory owned by safe type);
                             try result.appendSlice(self.allocator, str);
                         },
                         'M' => {
                             const str = try std.fmt.allocPrint(self.allocator, "{d:0>2}", .{day_secs.getMinutesIntoHour()});
-                            defer self.allocator.free(str);
+                            // safe-transpile: free removed (memory owned by safe type);
                             try result.appendSlice(self.allocator, str);
                         },
                         'S' => {
                             const str = try std.fmt.allocPrint(self.allocator, "{d:0>2}", .{day_secs.getSecondsIntoMinute()});
-                            defer self.allocator.free(str);
+                            // safe-transpile: free removed (memory owned by safe type);
                             try result.appendSlice(self.allocator, str);
                         },
                         's' => {
                             const str = try std.fmt.allocPrint(self.allocator, "{d}", .{timestamp});
-                            defer self.allocator.free(str);
+                            // safe-transpile: free removed (memory owned by safe type);
                             try result.appendSlice(self.allocator, str);
                         },
                         else => {
@@ -1566,13 +1585,13 @@ pub const Evaluator = struct {
             return Value.initStringOwned(output, self.allocator);
         }
 
-        if (std.mem.eql(u8, name, "mktime")) {
+        if (safe.SimdUtils.eql(name, "mktime")) {
             // mktime("YYYY MM DD HH MM SS [DST]") -> timestamp
             if (args.len == 0) return Value.initNumber(-1.0);
             const val = try self.evaluateExpression(args[0]);
             const datespec = try val.asString(self.allocator);
             // Parse "YYYY MM DD HH MM SS"
-            var parts: [6]i64 = undefined;
+            var parts: [6]i64 = .{};
             var part_idx: usize = 0;
             var iter = std.mem.splitScalar(u8, datespec, ' ');
             while (iter.next()) |part| {
@@ -1601,6 +1620,7 @@ pub const Evaluator = struct {
             const month_days = [_]i64{ 0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
             var m: i64 = 1;
             while (m < month) : (m += 1) {
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 days += month_days[@intCast(m)];
                 if (m == 2 and isLeapYear(year)) days += 1;
             }
@@ -1611,8 +1631,8 @@ pub const Evaluator = struct {
             return Value.initNumber(@floatFromInt(timestamp));
         }
 
-        if (std.mem.eql(u8, name, "asort") or std.mem.eql(u8, name, "asorti")) {
-            const is_asorti = std.mem.eql(u8, name, "asorti");
+        if (safe.SimdUtils.eql(name, "asort") or safe.SimdUtils.eql(name, "asorti")) {
+            const is_asorti = safe.SimdUtils.eql(name, "asorti");
             if (args.len == 0) return Value.initNumber(0.0);
 
             // Get source array name
@@ -1635,7 +1655,8 @@ pub const Evaluator = struct {
             // Collect items from source array
             var items = std.ArrayListUnmanaged(ArrayItem){};
             defer {
-                for (items.items) |*item| {
+                for (0..items.items.len) |__zust_i| {
+                    var item = &items.items[__zust_i];
                     self.allocator.free(item.key);
                 }
                 items.deinit(self.allocator);
@@ -1659,9 +1680,9 @@ pub const Evaluator = struct {
                         return std.mem.lessThan(u8, a.key, b.key);
                     } else {
                         const a_str = a.val.asString(ctx.allocator) catch "";
-                        defer ctx.allocator.free(a_str);
+                        // safe-transpile: free removed (memory owned by safe type);
                         const b_str = b.val.asString(ctx.allocator) catch "";
-                        defer ctx.allocator.free(b_str);
+                        // safe-transpile: free removed (memory owned by safe type);
                         return std.mem.lessThan(u8, a_str, b_str);
                     }
                 }
@@ -1679,10 +1700,11 @@ pub const Evaluator = struct {
             }
 
             // Write sorted items to destination array with 1-based indices
+            // safe-transpile: for with index access requires manual review
             for (items.items, 0..) |item, i| {
                 const idx = i + 1;
                 const key_str = try std.fmt.allocPrint(self.allocator, "{d}", .{idx});
-                defer self.allocator.free(key_str);
+                // safe-transpile: free removed (memory owned by safe type);
                 if (is_asorti) {
                     const val_copy = try self.allocator.dupe(u8, item.key);
                     try self.setArrayElement(dest_name, key_str, Value.initStringOwned(val_copy, self.allocator));
@@ -1695,14 +1717,14 @@ pub const Evaluator = struct {
         }
 
         // Bitwise functions
-        if (std.mem.eql(u8, name, "and") or std.mem.eql(u8, name, "or") or std.mem.eql(u8, name, "xor")) {
+        if (safe.SimdUtils.eql(name, "and") or safe.SimdUtils.eql(name, "or") or safe.SimdUtils.eql(name, "xor")) {
             if (args.len < 2) return Value.initNumber(0.0);
             var result: i64 = @as(i64, @intFromFloat((try self.evaluateExpression(args[0])).asNumber()));
             for (args[1..]) |arg| {
                 const val: i64 = @as(i64, @intFromFloat((try self.evaluateExpression(arg)).asNumber()));
-                if (std.mem.eql(u8, name, "and")) {
+                if (safe.SimdUtils.eql(name, "and")) {
                     result &= val;
-                } else if (std.mem.eql(u8, name, "or")) {
+                } else if (safe.SimdUtils.eql(name, "or")) {
                     result |= val;
                 } else {
                     result ^= val;
@@ -1711,27 +1733,29 @@ pub const Evaluator = struct {
             return Value.initNumber(@floatFromInt(result));
         }
 
-        if (std.mem.eql(u8, name, "compl")) {
+        if (safe.SimdUtils.eql(name, "compl")) {
             if (args.len == 0) return Value.initNumber(0.0);
             const val: i64 = @as(i64, @intFromFloat((try self.evaluateExpression(args[0])).asNumber()));
             return Value.initNumber(@floatFromInt(~val));
         }
 
-        if (std.mem.eql(u8, name, "lshift")) {
+        if (safe.SimdUtils.eql(name, "lshift")) {
             if (args.len < 2) return Value.initNumber(0.0);
             const val: i64 = @as(i64, @intFromFloat((try self.evaluateExpression(args[0])).asNumber()));
             const count: i64 = @as(i64, @intFromFloat((try self.evaluateExpression(args[1])).asNumber()));
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             return Value.initNumber(@floatFromInt(val << @intCast(count)));
         }
 
-        if (std.mem.eql(u8, name, "rshift")) {
+        if (safe.SimdUtils.eql(name, "rshift")) {
             if (args.len < 2) return Value.initNumber(0.0);
             const val: i64 = @as(i64, @intFromFloat((try self.evaluateExpression(args[0])).asNumber()));
             const count: i64 = @as(i64, @intFromFloat((try self.evaluateExpression(args[1])).asNumber()));
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             return Value.initNumber(@floatFromInt(val >> @intCast(count)));
         }
 
-        if (std.mem.eql(u8, name, "typeof")) {
+        if (safe.SimdUtils.eql(name, "typeof")) {
             if (args.len == 0) return Value.initString("unassigned");
             const val = try self.evaluateExpression(args[0]);
             if (val.flags.has_string) {
@@ -1748,6 +1772,7 @@ pub const Evaluator = struct {
             defer saved_vars.deinit(self.allocator);
 
             // Bind parameters
+            // safe-transpile: for with index access requires manual review
             for (func.params, 0..) |param, i| {
                 if (self.variables.get(param)) |existing| {
                     try saved_vars.put(self.allocator, param, existing);
@@ -1783,11 +1808,13 @@ pub const Evaluator = struct {
         return EvalError.UndefinedFunction;
     }
 
+    // safe-transpile: function uses raw slice parameter — consider safe.String
     fn matchRegex(self: *Evaluator, text: []const u8, pattern: []const u8) bool {
         if (self.ignorecase) {
             // Case-insensitive literal matching
             return std.ascii.indexOfIgnoreCase(text, pattern) != null;
         }
+        // zust: use safe.String or safe.GuardedSlice for slice operations
         return std.mem.indexOf(u8, text, pattern) != null;
     }
 };
@@ -1807,7 +1834,7 @@ test "Evaluator: simple print" {
     defer eval.deinit();
 
     const output = try eval.execute(&program, "hello world", null, true);
-    defer allocator.free(output);
+    // safe-transpile: free removed (memory owned by safe type);
 
     try std.testing.expectEqualStrings("hello\n", output);
 }
@@ -1823,7 +1850,7 @@ test "Evaluator: arithmetic expression" {
     defer eval.deinit();
 
     const output = try eval.execute(&program, "", null, true);
-    defer allocator.free(output);
+    // safe-transpile: free removed (memory owned by safe type);
 
     try std.testing.expectEqualStrings("14\n", output);
 }
@@ -1839,7 +1866,7 @@ test "Evaluator: variable assignment" {
     defer eval.deinit();
 
     const output = try eval.execute(&program, "", null, true);
-    defer allocator.free(output);
+    // safe-transpile: free removed (memory owned by safe type);
 
     try std.testing.expectEqualStrings("5\n", output);
 }

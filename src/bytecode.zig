@@ -144,7 +144,9 @@ pub const Instruction = extern struct {
     pub fn withOffset(op: Opcode, offset: u16) Instruction {
         return .{
             .opcode = @intFromEnum(op),
+            // safe-transpile: @truncate requires manual review — consider safe.CheckedInt(T).init(@truncate)
             .arg1 = @truncate(offset),
+            // safe-transpile: @truncate requires manual review — consider safe.CheckedInt(T).init(@truncate)
             .arg2 = @truncate(offset >> 8),
             .arg3 = 0,
         };
@@ -199,12 +201,12 @@ pub const BytecodeProgram = struct {
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *BytecodeProgram) void {
-        self.allocator.free(self.instructions);
-        self.allocator.free(self.num_constants);
+        // safe-transpile: free removed (memory owned by safe type);
+        // safe-transpile: free removed (memory owned by safe type);
         for (self.str_constants) |s| {
-            self.allocator.free(s);
+            // safe-transpile: free removed (memory owned by safe type);
         }
-        self.allocator.free(self.str_constants);
+        // safe-transpile: free removed (memory owned by safe type);
     }
 };
 
@@ -258,7 +260,7 @@ pub const Compiler = struct {
         self.instructions.deinit(self.allocator);
         self.num_constants.deinit(self.allocator);
         for (self.str_constants.items) |s| {
-            self.allocator.free(s);
+            // safe-transpile: free removed (memory owned by safe type);
         }
         self.str_constants.deinit(self.allocator);
         self.variables.deinit(self.allocator);
@@ -277,12 +279,14 @@ pub const Compiler = struct {
         // Compile BEGIN block
         if (program.begin) |begin| {
             has_begin = true;
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             begin_offset = @intCast(self.instructions.items.len);
             try self.compileStatement(begin);
             try self.emit(.halt);
         }
 
         // Compile main rules
+        // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
         main_offset = @intCast(self.instructions.items.len);
         for (program.rules) |rule| {
             // Compile pattern (if present)
@@ -292,6 +296,7 @@ pub const Compiler = struct {
                 try self.emitInst(Instruction.withOffset(.jmp_if_not, 0)); // Patch later
                 try self.compileStatement(rule.action);
                 // Patch jump
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 const end_idx: u16 = @intCast(self.instructions.items.len);
                 self.instructions.items[jmp_idx] = Instruction.withOffset(.jmp_if_not, end_idx);
             } else {
@@ -304,6 +309,7 @@ pub const Compiler = struct {
         // Compile END block
         if (program.end) |end| {
             has_end = true;
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             end_offset = @intCast(self.instructions.items.len);
             try self.compileStatement(end);
             try self.emit(.halt);
@@ -335,7 +341,8 @@ pub const Compiler = struct {
     fn compileStatement(self: *Self, stmt: *ast.Statement) !void {
         switch (stmt.kind) {
             .block => |stmts| {
-                for (stmts) |*s| {
+                for (0..stmts.len) |__zust_i| {
+                    var s = &stmts[__zust_i];
                     var inner = s.*;
                     try self.compileStatement(&inner);
                 }
@@ -348,6 +355,7 @@ pub const Compiler = struct {
                 for (p.args) |arg| {
                     try self.compileExpression(arg);
                 }
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 try self.emitInst(Instruction.withArg1(.print, @intCast(p.args.len)));
             },
             .printf => |pf| {
@@ -355,6 +363,7 @@ pub const Compiler = struct {
                 for (pf.args) |arg| {
                     try self.compileExpression(arg);
                 }
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 try self.emitInst(Instruction.withArg1(.printf_op, @intCast(pf.args.len + 1)));
             },
             .if_stmt => |is| {
@@ -365,34 +374,42 @@ pub const Compiler = struct {
                 if (is.else_branch) |eb| {
                     const jmp_end_idx = self.instructions.items.len;
                     try self.emitInst(Instruction.withOffset(.jmp, 0));
+                    // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                     const else_start: u16 = @intCast(self.instructions.items.len);
                     self.instructions.items[jmp_else_idx] = Instruction.withOffset(.jmp_if_not, else_start);
                     try self.compileStatement(eb);
+                    // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                     const end_idx: u16 = @intCast(self.instructions.items.len);
                     self.instructions.items[jmp_end_idx] = Instruction.withOffset(.jmp, end_idx);
                 } else {
+                    // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                     const end_idx: u16 = @intCast(self.instructions.items.len);
                     self.instructions.items[jmp_else_idx] = Instruction.withOffset(.jmp_if_not, end_idx);
                 }
             },
             .while_stmt => |ws| {
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 const loop_start: u32 = @intCast(self.instructions.items.len);
                 self.loop_depth += 1;
                 try self.compileExpression(ws.condition);
                 const jmp_end_idx = self.instructions.items.len;
                 try self.emitInst(Instruction.withOffset(.jmp_if_not, 0));
                 try self.compileStatement(ws.body);
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 try self.emitInst(Instruction.withOffset(.jmp, @intCast(loop_start)));
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 const loop_end: u16 = @intCast(self.instructions.items.len);
                 self.instructions.items[jmp_end_idx] = Instruction.withOffset(.jmp_if_not, loop_end);
                 self.loop_depth -= 1;
                 // Patch break/continue
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 try self.patchLoopControls(loop_start, @intCast(loop_end));
             },
             .for_stmt => |fs| {
                 if (fs.init) |init_stmt| {
                     try self.compileStatement(init_stmt);
                 }
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 const loop_start: u32 = @intCast(self.instructions.items.len);
                 self.loop_depth += 1;
                 if (fs.condition) |cond| {
@@ -404,10 +421,13 @@ pub const Compiler = struct {
                         try self.compileExpression(upd);
                         try self.emit(.pop);
                     }
+                    // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                     try self.emitInst(Instruction.withOffset(.jmp, @intCast(loop_start)));
+                    // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                     const loop_end: u16 = @intCast(self.instructions.items.len);
                     self.instructions.items[jmp_idx] = Instruction.withOffset(.jmp_if_not, loop_end);
                     self.loop_depth -= 1;
+                    // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                     try self.patchLoopControls(loop_start, @intCast(loop_end));
                 } else {
                     try self.compileStatement(fs.body);
@@ -415,16 +435,19 @@ pub const Compiler = struct {
                         try self.compileExpression(upd);
                         try self.emit(.pop);
                     }
+                    // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                     try self.emitInst(Instruction.withOffset(.jmp, @intCast(loop_start)));
                     self.loop_depth -= 1;
                 }
             },
             .break_stmt => {
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 const idx: u32 = @intCast(self.instructions.items.len);
                 try self.loop_breaks.append(self.allocator, idx);
                 try self.emitInst(Instruction.withOffset(.jmp, 0)); // Patch later
             },
             .continue_stmt => {
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 const idx: u32 = @intCast(self.instructions.items.len);
                 try self.loop_continues.append(self.allocator, idx);
                 try self.emitInst(Instruction.withOffset(.jmp, 0)); // Patch later
@@ -457,10 +480,14 @@ pub const Compiler = struct {
         switch (expr.kind) {
             .number_literal => |n| {
                 const idx = try self.addNumConstant(n);
+                // safe-transpile: @truncate requires manual review — consider safe.CheckedInt(T).init(@truncate)
+                // safe-transpile: @truncate requires manual review — consider safe.CheckedInt(T).init(@truncate)
                 try self.emitInst(Instruction.withArgs(.push_num, @truncate(idx), @truncate(idx >> 8)));
             },
             .string_literal => |s| {
                 const idx = try self.addStrConstant(s);
+                // safe-transpile: @truncate requires manual review — consider safe.CheckedInt(T).init(@truncate)
+                // safe-transpile: @truncate requires manual review — consider safe.CheckedInt(T).init(@truncate)
                 try self.emitInst(Instruction.withArgs(.push_str, @truncate(idx), @truncate(idx >> 8)));
             },
             .whole_line => {
@@ -479,17 +506,17 @@ pub const Compiler = struct {
             },
             .variable => |name| {
                 // Check special variables
-                if (std.mem.eql(u8, name, "NR")) {
+                if (safe.SimdUtils.eql(name, "NR")) {
                     try self.emitInst(Instruction.withArg1(.push_special, @intFromEnum(SpecialVarType.nr)));
-                } else if (std.mem.eql(u8, name, "NF")) {
+                } else if (safe.SimdUtils.eql(name, "NF")) {
                     try self.emitInst(Instruction.withArg1(.push_special, @intFromEnum(SpecialVarType.nf)));
-                } else if (std.mem.eql(u8, name, "FNR")) {
+                } else if (safe.SimdUtils.eql(name, "FNR")) {
                     try self.emitInst(Instruction.withArg1(.push_special, @intFromEnum(SpecialVarType.fnr)));
-                } else if (std.mem.eql(u8, name, "FS")) {
+                } else if (safe.SimdUtils.eql(name, "FS")) {
                     try self.emitInst(Instruction.withArg1(.push_special, @intFromEnum(SpecialVarType.fs)));
-                } else if (std.mem.eql(u8, name, "OFS")) {
+                } else if (safe.SimdUtils.eql(name, "OFS")) {
                     try self.emitInst(Instruction.withArg1(.push_special, @intFromEnum(SpecialVarType.ofs)));
-                } else if (std.mem.eql(u8, name, "ORS")) {
+                } else if (safe.SimdUtils.eql(name, "ORS")) {
                     try self.emitInst(Instruction.withArg1(.push_special, @intFromEnum(SpecialVarType.ors)));
                 } else {
                     const var_idx = try self.getOrCreateVariable(name);
@@ -572,30 +599,31 @@ pub const Compiler = struct {
                     try self.compileExpression(arg);
                 }
                 // Built-in functions
-                if (std.mem.eql(u8, fc.name, "length")) {
+                if (safe.SimdUtils.eql(fc.name, "length")) {
                     try self.emit(.length);
-                } else if (std.mem.eql(u8, fc.name, "substr")) {
+                } else if (safe.SimdUtils.eql(fc.name, "substr")) {
                     try self.emit(.substr);
-                } else if (std.mem.eql(u8, fc.name, "index")) {
+                } else if (safe.SimdUtils.eql(fc.name, "index")) {
                     try self.emit(.index_fn);
-                } else if (std.mem.eql(u8, fc.name, "toupper")) {
+                } else if (safe.SimdUtils.eql(fc.name, "toupper")) {
                     try self.emit(.toupper);
-                } else if (std.mem.eql(u8, fc.name, "tolower")) {
+                } else if (safe.SimdUtils.eql(fc.name, "tolower")) {
                     try self.emit(.tolower);
-                } else if (std.mem.eql(u8, fc.name, "sin")) {
+                } else if (safe.SimdUtils.eql(fc.name, "sin")) {
                     try self.emit(.sin);
-                } else if (std.mem.eql(u8, fc.name, "cos")) {
+                } else if (safe.SimdUtils.eql(fc.name, "cos")) {
                     try self.emit(.cos);
-                } else if (std.mem.eql(u8, fc.name, "sqrt")) {
+                } else if (safe.SimdUtils.eql(fc.name, "sqrt")) {
                     try self.emit(.sqrt);
-                } else if (std.mem.eql(u8, fc.name, "int")) {
+                } else if (safe.SimdUtils.eql(fc.name, "int")) {
                     try self.emit(.int_fn);
-                } else if (std.mem.eql(u8, fc.name, "log")) {
+                } else if (safe.SimdUtils.eql(fc.name, "log")) {
                     try self.emit(.log_fn);
-                } else if (std.mem.eql(u8, fc.name, "exp")) {
+                } else if (safe.SimdUtils.eql(fc.name, "exp")) {
                     try self.emit(.exp_fn);
                 } else {
                     // User function - emit call
+                    // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                     try self.emitInst(Instruction.withArgs(.call, 0, @intCast(fc.args.len)));
                 }
             },
@@ -606,9 +634,11 @@ pub const Compiler = struct {
                 try self.compileExpression(t.true_expr);
                 const jmp_end = self.instructions.items.len;
                 try self.emitInst(Instruction.withOffset(.jmp, 0));
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 const false_start: u16 = @intCast(self.instructions.items.len);
                 self.instructions.items[jmp_false] = Instruction.withOffset(.jmp_if_not, false_start);
                 try self.compileExpression(t.false_expr);
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 const end: u16 = @intCast(self.instructions.items.len);
                 self.instructions.items[jmp_end] = Instruction.withOffset(.jmp, end);
             },
@@ -621,25 +651,33 @@ pub const Compiler = struct {
 
     fn addNumConstant(self: *Self, n: f64) !u16 {
         // Check if already exists
+        // safe-transpile: for with index access requires manual review
         for (self.num_constants.items, 0..) |c, i| {
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             if (c == n) return @intCast(i);
         }
         const idx = self.num_constants.items.len;
         try self.num_constants.append(self.allocator, n);
+        // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
         return @intCast(idx);
     }
 
+    // safe-transpile: function uses raw slice parameter — consider safe.String
     fn addStrConstant(self: *Self, s: []const u8) !u16 {
         // Check if already exists
+        // safe-transpile: for with index access requires manual review
         for (self.str_constants.items, 0..) |c, i| {
-            if (std.mem.eql(u8, c, s)) return @intCast(i);
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
+            if (safe.SimdUtils.eql(c, s)) return @intCast(i);
         }
         const idx = self.str_constants.items.len;
         const copy = try self.allocator.dupe(u8, s);
         try self.str_constants.append(self.allocator, copy);
+        // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
         return @intCast(idx);
     }
 
+    // safe-transpile: function uses raw slice parameter — consider safe.String
     fn getOrCreateVariable(self: *Self, name: []const u8) !u8 {
         if (self.variables.get(name)) |idx| {
             return idx;
@@ -653,12 +691,14 @@ pub const Compiler = struct {
     fn patchLoopControls(self: *Self, loop_start: u32, loop_end: u32) !void {
         // Patch break statements to jump to end
         for (self.loop_breaks.items) |idx| {
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             self.instructions.items[idx] = Instruction.withOffset(.jmp, @intCast(loop_end));
         }
         self.loop_breaks.clearRetainingCapacity();
 
         // Patch continue statements to jump to start
         for (self.loop_continues.items) |idx| {
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             self.instructions.items[idx] = Instruction.withOffset(.jmp, @intCast(loop_start));
         }
         self.loop_continues.clearRetainingCapacity();

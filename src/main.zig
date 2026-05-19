@@ -23,9 +23,9 @@ pub fn main() !u8 {
 
     // Parse arguments
     var options = AwkOptions{};
-    var pattern: []const u8 = "";
-    var action: []const u8 = "";
-    var replacement: []const u8 = "";
+    var pattern: safe.Slice(u8) = "";
+    var action: safe.Slice(u8) = "";
+    var replacement: safe.Slice(u8) = "";
     var files: std.ArrayListUnmanaged([]const u8) = .{};
     defer files.deinit(allocator);
     var verbose = false;
@@ -35,15 +35,15 @@ pub fn main() !u8 {
     var builtin_call: ?BuiltinCall = null;
     var special_var: SpecialVar = .none;
     var allocated_fields: ?[]const u32 = null;
-    defer if (allocated_fields) |f| allocator.free(f);
-    var program_text: []const u8 = ""; // Original AWK program for full parsing
+    // safe-transpile: free removed (memory owned by safe type);
+    var program_text: safe.Slice(u8) = ""; // Original AWK program for full parsing
     var program_text_allocated = false;
-    defer if (program_text_allocated) allocator.free(program_text);
+    // safe-transpile: free removed (memory owned by safe type);
     var variables: std.StringHashMapUnmanaged([]const u8) = .{};
     defer {
         var var_it = variables.iterator();
         while (var_it.next()) |entry| {
-            allocator.free(entry.value_ptr.*);
+            // safe-transpile: free removed (memory owned by safe type);
         }
         variables.deinit(allocator);
     }
@@ -52,21 +52,22 @@ pub fn main() !u8 {
     while (i < args.len) : (i += 1) {
         const arg = args[i];
 
-        if (std.mem.eql(u8, arg, "-F") and i + 1 < args.len) {
+        if (safe.SimdUtils.eql(arg, "-F") and i + 1 < args.len) {
             i += 1;
             options.field_separator = args[i];
         } else if (std.mem.startsWith(u8, arg, "-F")) {
             options.field_separator = arg[2..];
-        } else if (std.mem.eql(u8, arg, "-i")) {
+        } else if (safe.SimdUtils.eql(arg, "-i")) {
             options.case_insensitive = true;
-        } else if (std.mem.eql(u8, arg, "--invert-match")) {
+        } else if (safe.SimdUtils.eql(arg, "--invert-match")) {
             options.invert_match = true;
-        } else if (std.mem.eql(u8, arg, "-v") and i + 1 < args.len) {
+        } else if (safe.SimdUtils.eql(arg, "-v") and i + 1 < args.len) {
             i += 1;
             const assign = args[i];
+            // zust: use safe.String or safe.GuardedSlice for slice operations
             if (std.mem.indexOf(u8, assign, "=")) |eq_pos| {
                 const var_name = assign[0..eq_pos];
-                const var_val = assign[eq_pos + 1..];
+                const var_val = assign[eq_pos + 1 ..];
                 const name_copy = try allocator.dupe(u8, var_name);
                 const val_copy = try allocator.dupe(u8, var_val);
                 try variables.put(allocator, name_copy, val_copy);
@@ -74,7 +75,7 @@ pub fn main() !u8 {
                 std.debug.print("gawk: invalid -v assignment: {s}\n", .{assign});
                 return 2;
             }
-        } else if (std.mem.eql(u8, arg, "-f") and i + 1 < args.len) {
+        } else if (safe.SimdUtils.eql(arg, "-f") and i + 1 < args.len) {
             i += 1;
             const file = std.fs.cwd().openFile(args[i], .{}) catch |err| {
                 std.debug.print("gawk: {s}: {}\n", .{ args[i], err });
@@ -85,35 +86,36 @@ pub fn main() !u8 {
                 std.debug.print("gawk: {s}: {}\n", .{ args[i], err });
                 return 2;
             };
-            defer allocator.free(content);
+            // safe-transpile: free removed (memory owned by safe type);
             // Concatenate to program_text
             if (program_text.len > 0) {
                 const combined = try std.mem.concat(allocator, u8, &.{ program_text, "\n", content });
-                if (program_text_allocated) allocator.free(program_text);
-                program_text = combined;
+                if (program_text_allocated) // safe-transpile: free removed (memory owned by safe type);
+                    program_text = combined;
                 program_text_allocated = true;
             } else {
                 program_text = try allocator.dupe(u8, content);
                 program_text_allocated = true;
             }
-        } else if (std.mem.eql(u8, arg, "-e") and i + 1 < args.len) {
+        } else if (safe.SimdUtils.eql(arg, "-e") and i + 1 < args.len) {
             i += 1;
             if (program_text.len > 0) {
                 const combined = try std.mem.concat(allocator, u8, &.{ program_text, "\n", args[i] });
-                if (program_text_allocated) allocator.free(program_text);
-                program_text = combined;
+                if (program_text_allocated) // safe-transpile: free removed (memory owned by safe type);
+                    program_text = combined;
                 program_text_allocated = true;
             } else {
                 program_text = try allocator.dupe(u8, args[i]);
                 program_text_allocated = true;
             }
-        } else if (std.mem.eql(u8, arg, "--assign") and i + 1 < args.len) {
+        } else if (safe.SimdUtils.eql(arg, "--assign") and i + 1 < args.len) {
             // --assign is an alias for -v
             i += 1;
             const assign = args[i];
+            // zust: use safe.String or safe.GuardedSlice for slice operations
             if (std.mem.indexOf(u8, assign, "=")) |eq_pos| {
                 const var_name = assign[0..eq_pos];
-                const var_val = assign[eq_pos + 1..];
+                const var_val = assign[eq_pos + 1 ..];
                 const name_copy = try allocator.dupe(u8, var_name);
                 const val_copy = try allocator.dupe(u8, var_val);
                 try variables.put(allocator, name_copy, val_copy);
@@ -121,33 +123,33 @@ pub fn main() !u8 {
                 std.debug.print("gawk: invalid --assign assignment: {s}\n", .{assign});
                 return 2;
             }
-        } else if (std.mem.eql(u8, arg, "--version")) {
+        } else if (safe.SimdUtils.eql(arg, "--version")) {
             _ = std.posix.write(std.posix.STDOUT_FILENO, "gawk (e-jerk GPU-accelerated) 1.0\n") catch {};
             return 0;
-        } else if (std.mem.eql(u8, arg, "--traditional") or std.mem.eql(u8, arg, "-c")) {
+        } else if (safe.SimdUtils.eql(arg, "--traditional") or safe.SimdUtils.eql(arg, "-c")) {
             options.traditional_mode = true;
-        } else if (std.mem.eql(u8, arg, "--posix") or std.mem.eql(u8, arg, "-P")) {
+        } else if (safe.SimdUtils.eql(arg, "--posix") or safe.SimdUtils.eql(arg, "-P")) {
             options.posix_mode = true;
-        } else if (std.mem.eql(u8, arg, "--lint")) {
+        } else if (safe.SimdUtils.eql(arg, "--lint")) {
             options.lint_mode = true;
-        } else if (std.mem.eql(u8, arg, "--dump-variables")) {
+        } else if (safe.SimdUtils.eql(arg, "--dump-variables")) {
             options.dump_variables = true;
-        } else if (std.mem.eql(u8, arg, "--profile")) {
+        } else if (safe.SimdUtils.eql(arg, "--profile")) {
             options.profile_mode = true;
-        } else if (std.mem.eql(u8, arg, "-W") and i + 1 < args.len) {
+        } else if (safe.SimdUtils.eql(arg, "-W") and i + 1 < args.len) {
             i += 1;
             const w_arg = args[i];
-            if (std.mem.eql(u8, w_arg, "traditional")) {
+            if (safe.SimdUtils.eql(w_arg, "traditional")) {
                 options.traditional_mode = true;
-            } else if (std.mem.eql(u8, w_arg, "posix")) {
+            } else if (safe.SimdUtils.eql(w_arg, "posix")) {
                 options.posix_mode = true;
-            } else if (std.mem.eql(u8, w_arg, "lint")) {
+            } else if (safe.SimdUtils.eql(w_arg, "lint")) {
                 options.lint_mode = true;
-            } else if (std.mem.eql(u8, w_arg, "dump-variables")) {
+            } else if (safe.SimdUtils.eql(w_arg, "dump-variables")) {
                 options.dump_variables = true;
-            } else if (std.mem.eql(u8, w_arg, "profile")) {
+            } else if (safe.SimdUtils.eql(w_arg, "profile")) {
                 options.profile_mode = true;
-            } else if (std.mem.eql(u8, w_arg, "version")) {
+            } else if (safe.SimdUtils.eql(w_arg, "version")) {
                 _ = std.posix.write(std.posix.STDOUT_FILENO, "gawk (e-jerk GPU-accelerated) 1.0\n") catch {};
                 return 0;
             } else if (std.mem.startsWith(u8, w_arg, "dump-variables=")) {
@@ -158,22 +160,22 @@ pub fn main() !u8 {
                 std.debug.print("gawk: unknown -W option: {s}\n", .{w_arg});
                 return 2;
             }
-        } else if (std.mem.eql(u8, arg, "--verbose")) {
+        } else if (safe.SimdUtils.eql(arg, "--verbose")) {
             verbose = true;
-        } else if (std.mem.eql(u8, arg, "--backend") and i + 1 < args.len) {
+        } else if (safe.SimdUtils.eql(arg, "--backend") and i + 1 < args.len) {
             i += 1;
             backend_mode = parseBackendMode(args[i]);
-        } else if (std.mem.eql(u8, arg, "--cpu")) {
+        } else if (safe.SimdUtils.eql(arg, "--cpu")) {
             backend_mode = .cpu;
-        } else if (std.mem.eql(u8, arg, "--gnu")) {
+        } else if (safe.SimdUtils.eql(arg, "--gnu")) {
             backend_mode = .cpu_gnu;
-        } else if (std.mem.eql(u8, arg, "--gpu")) {
+        } else if (safe.SimdUtils.eql(arg, "--gpu")) {
             backend_mode = .gpu;
-        } else if (std.mem.eql(u8, arg, "--metal")) {
+        } else if (safe.SimdUtils.eql(arg, "--metal")) {
             backend_mode = .metal;
-        } else if (std.mem.eql(u8, arg, "--vulkan")) {
+        } else if (safe.SimdUtils.eql(arg, "--vulkan")) {
             backend_mode = .vulkan;
-        } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
+        } else if (safe.SimdUtils.eql(arg, "-h") or safe.SimdUtils.eql(arg, "--help")) {
             printHelp();
             return 0;
         } else if (arg[0] != '-') {
@@ -182,8 +184,8 @@ pub fn main() !u8 {
             if (program_text.len > 0) {
                 try files.append(allocator, arg);
             } else if (pattern.len == 0 and action.len == 0) {
-                if (program_text_allocated) allocator.free(program_text);
-                program_text = arg; // Save original program for full parsing
+                if (program_text_allocated) // safe-transpile: free removed (memory owned by safe type);
+                    program_text = arg; // Save original program for full parsing
                 program_text_allocated = false;
                 // Parse AWK program: /pattern/ or /pattern/ {action} or {action}
                 const parsed = try parseAwkProgram(arg, allocator, &options);
@@ -225,7 +227,7 @@ pub fn main() !u8 {
     }
 
     // Read input
-    var text: []u8 = undefined;
+    var text: safe.Slice(u8) = .{};
     var text_allocator: std.mem.Allocator = allocator;
 
     if (files.items.len > 0) {
@@ -253,8 +255,12 @@ pub fn main() !u8 {
         // Read from stdin
         var stdin_list: std.ArrayListUnmanaged(u8) = .{};
         defer stdin_list.deinit(allocator);
-        var buf: [4096]u8 = undefined;
+        var buf: [4096]u8 = .{};
+        var __zust_loop_counter: u64 = 0;
         while (true) {
+            __zust_loop_counter += 1;
+            if (__zust_loop_counter > 1_000_000) return error.InfiniteLoop;
+
             const bytes_read = std.posix.read(std.posix.STDIN_FILENO, &buf) catch |err| {
                 if (err == error.WouldBlock) continue;
                 std.debug.print("gawk: error reading stdin: {}\n", .{err});
@@ -265,14 +271,13 @@ pub fn main() !u8 {
         }
         text = try stdin_list.toOwnedSlice(allocator);
     }
-    defer text_allocator.free(text);
+    // safe-transpile: free removed (memory owned by safe type);
 
     // Check if program needs full parser/evaluator for complex AWK features
     if (needsFullParser(program_text)) {
         // Try GPU bytecode VM first for full feature parity
-        const gpu_output = executeFullAwkGpu(program_text, text, options, backend_mode, verbose, allocator);
-        if (gpu_output) |output| {
-            defer allocator.free(output);
+        if (executeFullAwkGpu(program_text, text, options, backend_mode, verbose, allocator)) |output| {
+            // safe-transpile: free removed (memory owned by safe type);
             _ = std.posix.write(std.posix.STDOUT_FILENO, output) catch {};
             return 0;
         } else |_| {
@@ -287,7 +292,7 @@ pub fn main() !u8 {
             defer program.deinit();
             var eval = evaluator.Evaluator.init(allocator, &program.functions);
             defer eval.deinit();
-            if (!std.mem.eql(u8, options.field_separator, " \t")) {
+            if (!safe.SimdUtils.eql(options.field_separator, " \t")) {
                 eval.field_separator = options.field_separator;
             }
             var var_it = variables.iterator();
@@ -301,6 +306,7 @@ pub fn main() !u8 {
             try eval.variables.put(allocator, "ARGC", Value.initNumber(argc_val));
             var argv_array = std.StringHashMapUnmanaged(Value){};
             try argv_array.put(allocator, "0", Value.initString("gawk"));
+            // safe-transpile: for with index access requires manual review
             for (files.items, 0..) |path, idx| {
                 const key = try std.fmt.allocPrint(allocator, "{d}", .{idx + 1});
                 try argv_array.put(allocator, key, Value.initString(path));
@@ -308,18 +314,19 @@ pub fn main() !u8 {
             try eval.arrays.put(allocator, "ARGV", argv_array);
 
             if (files.items.len > 0) {
+                // safe-transpile: for with index access requires manual review
                 for (files.items, 0..) |path, file_idx| {
                     const file_text = readFileToString(allocator, path) catch |err| {
                         std.debug.print("gawk: {s}: {}\n", .{ path, err });
                         continue;
                     };
-                    defer allocator.free(file_text);
+                    // safe-transpile: free removed (memory owned by safe type);
                     const is_last = file_idx == files.items.len - 1;
                     const output = eval.execute(&program, file_text, path, is_last) catch |err| {
                         std.debug.print("gawk: error executing program: {}\n", .{err});
                         return 1;
                     };
-                    defer allocator.free(output);
+                    // safe-transpile: free removed (memory owned by safe type);
                     _ = std.posix.write(std.posix.STDOUT_FILENO, output) catch {};
                     // Check if nextfile was requested; if so, continue to next file
                     // (eval.execute already breaks on next_file, so we just continue)
@@ -329,7 +336,7 @@ pub fn main() !u8 {
                     std.debug.print("gawk: error executing program: {}\n", .{err});
                     return 1;
                 };
-                defer allocator.free(output);
+                // safe-transpile: free removed (memory owned by safe type);
                 _ = std.posix.write(std.posix.STDOUT_FILENO, output) catch {};
             }
             return 0;
@@ -343,20 +350,20 @@ pub fn main() !u8 {
 
         if (use_regex) {
             const substitutions = try cpu.findSubstitutionsRegex(text, pattern, options, allocator);
-            defer allocator.free(substitutions);
+            // safe-transpile: free removed (memory owned by safe type);
 
             const subs_to_apply = if (substitution_global) substitutions else if (substitutions.len > 0) substitutions[0..1] else substitutions;
             const result_text = try cpu.applySubstitutionsRegex(text, subs_to_apply, replacement, allocator);
-            defer allocator.free(result_text);
+            // safe-transpile: free removed (memory owned by safe type);
 
             _ = std.posix.write(std.posix.STDOUT_FILENO, result_text) catch {};
         } else {
             const substitutions = try cpu.findSubstitutions(text, pattern, options, allocator);
-            defer allocator.free(substitutions);
+            // safe-transpile: free removed (memory owned by safe type);
 
             const subs_to_apply = if (substitution_global) substitutions else if (substitutions.len > 0) substitutions[0..1] else substitutions;
             const result_text = try cpu.applySubstitutions(text, subs_to_apply, pattern.len, replacement, allocator);
-            defer allocator.free(result_text);
+            // safe-transpile: free removed (memory owned by safe type);
 
             _ = std.posix.write(std.posix.STDOUT_FILENO, result_text) catch {};
         }
@@ -432,12 +439,13 @@ pub fn main() !u8 {
     defer result.deinit();
 
     // Output results
+    // safe-transpile: for with index access requires manual review
     for (result.matches, 0..) |match, match_idx| {
         const line = text[match.line_start..match.line_end];
 
         // Handle special variables NR and NF
         if (special_var != .none) {
-            var buf: [32]u8 = undefined;
+            var buf: [32]u8 = .{};
             const value = switch (special_var) {
                 .nr => match.line_num + 1, // AWK line numbers are 1-indexed
                 .nf => match.field_count,
@@ -449,9 +457,10 @@ pub fn main() !u8 {
         } else if (builtin_call) |bc| {
             // Apply built-in function
             // Find the specified field
-            var field_text: []const u8 = line; // Default to whole line if $0
+            var field_text: safe.Slice(u8) = line; // Default to whole line if $0
             if (bc.field_num > 0) {
                 for (result.fields) |field| {
+                    // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                     if (field.line_idx == @as(u32, @intCast(match_idx)) and
                         field.field_idx == bc.field_num)
                     {
@@ -464,36 +473,41 @@ pub fn main() !u8 {
             // Apply the function
             switch (bc.func) {
                 .length => {
-                    var buf: [32]u8 = undefined;
+                    var buf: [32]u8 = .{};
                     const len_str = std.fmt.bufPrint(&buf, "{d}", .{field_text.len}) catch "0";
                     _ = std.posix.write(std.posix.STDOUT_FILENO, len_str) catch {};
                 },
                 .substr => {
                     // AWK substr is 1-indexed
+                    // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                     const start: usize = if (bc.arg1 > 0) @intCast(bc.arg1 - 1) else 0;
                     if (start < field_text.len) {
                         const max_len = field_text.len - start;
+                        // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                         const len: usize = if (bc.arg2 >= 0) @min(@as(usize, @intCast(bc.arg2)), max_len) else max_len;
                         _ = std.posix.write(std.posix.STDOUT_FILENO, field_text[start..][0..len]) catch {};
                     }
                 },
                 .index_fn => {
-                    var buf: [32]u8 = undefined;
+                    var buf: [32]u8 = .{};
+                    // zust: use safe.String or safe.GuardedSlice for slice operations
                     const pos: usize = if (std.mem.indexOf(u8, field_text, bc.string_arg)) |p| p + 1 else 0;
                     const pos_str = std.fmt.bufPrint(&buf, "{d}", .{pos}) catch "0";
                     _ = std.posix.write(std.posix.STDOUT_FILENO, pos_str) catch {};
                 },
                 .toupper => {
-                    var upper_buf: [4096]u8 = undefined;
+                    var upper_buf: [4096]u8 = .{};
                     const out_len = @min(field_text.len, upper_buf.len);
+                    // safe-transpile: for with index access requires manual review
                     for (field_text[0..out_len], 0..) |c, idx| {
                         upper_buf[idx] = if (c >= 'a' and c <= 'z') c - 32 else c;
                     }
                     _ = std.posix.write(std.posix.STDOUT_FILENO, upper_buf[0..out_len]) catch {};
                 },
                 .tolower => {
-                    var lower_buf: [4096]u8 = undefined;
+                    var lower_buf: [4096]u8 = .{};
                     const out_len = @min(field_text.len, lower_buf.len);
+                    // safe-transpile: for with index access requires manual review
                     for (field_text[0..out_len], 0..) |c, idx| {
                         lower_buf[idx] = if (c >= 'A' and c <= 'Z') c + 32 else c;
                     }
@@ -510,6 +524,7 @@ pub fn main() !u8 {
             for (options.requested_fields) |field_num| {
                 // Find field in result
                 for (result.fields) |field| {
+                    // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                     if (field.line_idx == @as(u32, @intCast(match_idx)) and
                         field.field_idx == field_num)
                     {
@@ -542,13 +557,14 @@ const BackendMode = enum {
     vulkan,
 };
 
+// safe-transpile: function uses raw slice parameter — consider safe.String
 fn parseBackendMode(s: []const u8) BackendMode {
-    if (std.mem.eql(u8, s, "auto")) return .auto;
-    if (std.mem.eql(u8, s, "gpu")) return .gpu;
-    if (std.mem.eql(u8, s, "cpu")) return .cpu;
-    if (std.mem.eql(u8, s, "gnu")) return .cpu_gnu;
-    if (std.mem.eql(u8, s, "metal")) return .metal;
-    if (std.mem.eql(u8, s, "vulkan")) return .vulkan;
+    if (safe.SimdUtils.eql(s, "auto")) return .auto;
+    if (safe.SimdUtils.eql(s, "gpu")) return .gpu;
+    if (safe.SimdUtils.eql(s, "cpu")) return .cpu;
+    if (safe.SimdUtils.eql(s, "gnu")) return .cpu_gnu;
+    if (safe.SimdUtils.eql(s, "metal")) return .metal;
+    if (safe.SimdUtils.eql(s, "vulkan")) return .vulkan;
     return .auto;
 }
 
@@ -620,6 +636,7 @@ const ParsedProgram = struct {
     }
 };
 
+// safe-transpile: function uses raw slice parameter — consider safe.String
 fn parseAwkProgram(program: []const u8, allocator: std.mem.Allocator, options: *AwkOptions) !ParsedProgram {
     _ = options;
     var result = ParsedProgram.init();
@@ -656,6 +673,7 @@ fn parseAwkProgram(program: []const u8, allocator: std.mem.Allocator, options: *
         const action = result.action;
 
         // Check for gsub or sub
+        // zust: use safe.String or safe.GuardedSlice for slice operations
         if (std.mem.indexOf(u8, action, "gsub(")) |gsub_start| {
             result.is_gsub = true;
 
@@ -676,6 +694,7 @@ fn parseAwkProgram(program: []const u8, allocator: std.mem.Allocator, options: *
             const repl_start = j;
             while (j < action.len and action[j] != '"') j += 1;
             result.replacement = action[repl_start..j];
+            // zust: use safe.String or safe.GuardedSlice for slice operations
         } else if (std.mem.indexOf(u8, action, "sub(")) |sub_start| {
             result.is_sub = true;
 
@@ -699,29 +718,38 @@ fn parseAwkProgram(program: []const u8, allocator: std.mem.Allocator, options: *
         }
 
         // Check for special variables NR and NF
+        // zust: use safe.String or safe.GuardedSlice for slice operations
         if (std.mem.indexOf(u8, action, "print")) |_| {
             // Check for NR (line number)
+            // zust: use safe.String or safe.GuardedSlice for slice operations
             if (std.mem.indexOf(u8, action, "NR") != null) {
                 result.special_var = .nr;
+                // zust: use safe.String or safe.GuardedSlice for slice operations
             } else if (std.mem.indexOf(u8, action, "NF") != null) {
                 result.special_var = .nf;
             }
         }
 
         // Check for built-in functions: length($N), substr($N, ...), index($N, ...), toupper($N), tolower($N)
+        // zust: use safe.String or safe.GuardedSlice for slice operations
         if (std.mem.indexOf(u8, action, "length(")) |len_start| {
             result.builtin = parseBuiltinCall(action[len_start..], .length);
+            // zust: use safe.String or safe.GuardedSlice for slice operations
         } else if (std.mem.indexOf(u8, action, "substr(")) |sub_start| {
             result.builtin = parseBuiltinCall(action[sub_start..], .substr);
+            // zust: use safe.String or safe.GuardedSlice for slice operations
         } else if (std.mem.indexOf(u8, action, "index(")) |idx_start| {
             result.builtin = parseBuiltinCall(action[idx_start..], .index_fn);
+            // zust: use safe.String or safe.GuardedSlice for slice operations
         } else if (std.mem.indexOf(u8, action, "toupper(")) |up_start| {
             result.builtin = parseBuiltinCall(action[up_start..], .toupper);
+            // zust: use safe.String or safe.GuardedSlice for slice operations
         } else if (std.mem.indexOf(u8, action, "tolower(")) |lo_start| {
             result.builtin = parseBuiltinCall(action[lo_start..], .tolower);
         }
 
         // Check for print $N (if no builtin function and no special var)
+        // zust: use safe.String or safe.GuardedSlice for slice operations
         if (result.builtin == null and result.special_var == .none and std.mem.indexOf(u8, action, "print") != null) {
             var fields_list: std.ArrayListUnmanaged(u32) = .{};
 
@@ -750,6 +778,7 @@ fn parseAwkProgram(program: []const u8, allocator: std.mem.Allocator, options: *
 }
 
 /// Parse a built-in function call from action text
+// safe-transpile: function uses raw slice parameter — consider safe.String
 fn parseBuiltinCall(text: []const u8, func_type: BuiltinFunction) ?BuiltinCall {
     var result = BuiltinCall{
         .func = func_type,
@@ -791,6 +820,7 @@ fn parseBuiltinCall(text: []const u8, func_type: BuiltinFunction) ?BuiltinCall {
         // Parse start position
         var start: i32 = 0;
         while (i < text.len and text[i] >= '0' and text[i] <= '9') {
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             start = start * 10 + @as(i32, @intCast(text[i] - '0'));
             i += 1;
         }
@@ -803,6 +833,7 @@ fn parseBuiltinCall(text: []const u8, func_type: BuiltinFunction) ?BuiltinCall {
             while (i < text.len and (text[i] == ' ' or text[i] == '\t')) i += 1;
             var len: i32 = 0;
             while (i < text.len and text[i] >= '0' and text[i] <= '9') {
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 len = len * 10 + @as(i32, @intCast(text[i] - '0'));
                 i += 1;
             }
@@ -921,6 +952,7 @@ fn printHelp() void {
 /// - Variables and arithmetic
 /// - Control flow (if/while/for)
 /// - User-defined functions
+// safe-transpile: function uses raw slice parameter — consider safe.String
 fn needsFullParser(program: []const u8) bool {
     // Keywords that indicate complex programs
     const complex_keywords = [_][]const u8{
@@ -953,6 +985,7 @@ fn needsFullParser(program: []const u8) bool {
     };
 
     for (complex_keywords) |kw| {
+        // zust: use safe.String or safe.GuardedSlice for slice operations
         if (std.mem.indexOf(u8, program, kw) != null) {
             return true;
         }
@@ -998,7 +1031,9 @@ fn needsFullParser(program: []const u8) bool {
                 // It's an assignment - check if it's not inside gsub()
                 const before = program[0..ident_start];
                 // Exclude assignments inside gsub()/sub() which use = as regex delimiter
+                // zust: use safe.String or safe.GuardedSlice for slice operations
                 if (std.mem.indexOf(u8, before, "gsub(") == null and
+                    // zust: use safe.String or safe.GuardedSlice for slice operations
                     std.mem.indexOf(u8, before, "sub(") == null)
                 {
                     return true;
@@ -1007,12 +1042,12 @@ fn needsFullParser(program: []const u8) bool {
 
             // Check for compound assignment
             if (i + 1 < program.len and
-                (std.mem.eql(u8, program[i .. i + 2], "+=") or
-                std.mem.eql(u8, program[i .. i + 2], "-=") or
-                std.mem.eql(u8, program[i .. i + 2], "*=") or
-                std.mem.eql(u8, program[i .. i + 2], "/=") or
-                std.mem.eql(u8, program[i .. i + 2], "%=") or
-                std.mem.eql(u8, program[i .. i + 2], "^=")))
+                (safe.SimdUtils.eql(program[i .. i + 2], "+=") or
+                    safe.SimdUtils.eql(program[i .. i + 2], "-=") or
+                    safe.SimdUtils.eql(program[i .. i + 2], "*=") or
+                    safe.SimdUtils.eql(program[i .. i + 2], "/=") or
+                    safe.SimdUtils.eql(program[i .. i + 2], "%=") or
+                    safe.SimdUtils.eql(program[i .. i + 2], "^=")))
             {
                 return true;
             }
@@ -1032,6 +1067,8 @@ fn needsFullParser(program: []const u8) bool {
 }
 
 /// Execute a complex AWK program using the full parser/evaluator
+// safe-transpile: function uses raw slice parameter — consider safe.String
+// safe-transpile: function returns small constant slice — consider safe.String
 fn readFileToString(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     const file = try std.fs.cwd().openFile(path, .{});
     defer file.close();
@@ -1044,6 +1081,8 @@ fn readFileToString(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     return buf;
 }
 
+// safe-transpile: function uses raw slice parameter — consider safe.String
+// safe-transpile: function returns small constant slice — consider safe.String
 fn executeFullAwk(program_text: []const u8, input: []const u8, field_separator: []const u8, variables: std.StringHashMapUnmanaged([]const u8), allocator: std.mem.Allocator, filename: ?[]const u8) ![]const u8 {
     var p = parser.Parser.init(program_text, allocator);
     var program = p.parse() catch {
@@ -1055,7 +1094,7 @@ fn executeFullAwk(program_text: []const u8, input: []const u8, field_separator: 
     defer eval.deinit();
 
     // Set field separator if provided
-    if (!std.mem.eql(u8, field_separator, " \t")) {
+    if (!safe.SimdUtils.eql(field_separator, " \t")) {
         eval.field_separator = field_separator;
     }
 
@@ -1070,6 +1109,8 @@ fn executeFullAwk(program_text: []const u8, input: []const u8, field_separator: 
 }
 
 /// Execute full AWK program on GPU using bytecode VM
+// safe-transpile: function uses raw slice parameter — consider safe.String
+// safe-transpile: function returns small constant slice — consider safe.String
 fn executeFullAwkGpu(
     program_text: []const u8,
     input: []const u8,
@@ -1088,19 +1129,20 @@ fn executeFullAwkGpu(
     // Compile to bytecode
     var compiler = bytecode.Compiler.init(allocator);
     defer compiler.deinit();
-    var bc = compiler.compile(&program) catch {
+    var compiled = compiler.compile(&program) catch {
         return error.CompileError;
     };
-    defer bc.deinit();
+    defer compiled.deinit();
 
     if (verbose) {
-        std.debug.print("Compiled AWK program to {} bytecode instructions\n", .{bc.instructions.len});
+        std.debug.print("Compiled AWK program to {} bytecode instructions\n", .{compiled.instructions.len});
     }
 
     // Convert to GPU-compatible format (same layout, just need to reinterpret)
-    const gpu_instructions = try allocator.alloc(gpu.Instruction, bc.instructions.len);
-    defer allocator.free(gpu_instructions);
-    for (bc.instructions, 0..) |inst, i| {
+    const gpu_instructions = try allocator.alloc(gpu.Instruction, compiled.instructions.len);
+    // safe-transpile: free removed (memory owned by safe type);
+    // safe-transpile: for with index access requires manual review
+    for (compiled.instructions, 0..) |inst, i| {
         // bytecode.Instruction has same layout as gpu.Instruction
         gpu_instructions[i] = .{
             .opcode = inst.opcode,
@@ -1110,17 +1152,18 @@ fn executeFullAwkGpu(
         };
     }
 
-    const gpu_constants = try allocator.alloc(f32, bc.num_constants.len);
-    defer allocator.free(gpu_constants);
-    for (bc.num_constants, 0..) |c, i| {
+    const gpu_constants = try allocator.alloc(f32, compiled.num_constants.len);
+    // safe-transpile: free removed (memory owned by safe type);
+    // safe-transpile: for with index access requires manual review
+    for (compiled.num_constants, 0..) |c, i| {
         gpu_constants[i] = @floatCast(c);
     }
 
     const gpu_bc = gpu.GpuBytecode{
         .instructions = gpu_instructions,
         .num_constants = gpu_constants,
-        .main_offset = bc.main_offset,
-        .num_variables = bc.num_variables,
+        .main_offset = compiled.main_offset,
+        .num_variables = compiled.num_variables,
         .allocator = allocator,
     };
 

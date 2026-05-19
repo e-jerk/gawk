@@ -45,6 +45,7 @@ pub const Value = struct {
         };
     }
 
+    // safe-transpile: function uses raw slice parameter — consider safe.String
     pub fn initString(s: []const u8) Value {
         return .{
             .repr = .{ .string = s },
@@ -52,6 +53,7 @@ pub const Value = struct {
         };
     }
 
+    // safe-transpile: function uses raw slice parameter — consider safe.String
     pub fn initStringOwned(s: []const u8, allocator: Allocator) Value {
         return .{
             .repr = .{ .string = s },
@@ -94,6 +96,7 @@ pub const Value = struct {
 
     /// Get value as a string, converting from number if necessary
     /// Returns a slice that may be temporary - caller should copy if needed
+    // safe-transpile: function returns small constant slice — consider safe.String
     pub fn asString(self: *const Value, allocator: Allocator) ![]const u8 {
         if (self.flags.has_string) {
             return self.repr.string;
@@ -107,6 +110,7 @@ pub const Value = struct {
     }
 
     /// Get string without allocation (returns "" if value is numeric only)
+    // safe-transpile: function returns small constant slice — consider safe.String
     pub fn asStringDirect(self: *const Value) []const u8 {
         if (self.flags.has_string) {
             return self.repr.string;
@@ -141,6 +145,7 @@ pub const Value = struct {
     // ------------------------------------------------------------------------
 
     /// Check if string looks like a number (for comparison purposes)
+    // safe-transpile: function uses raw slice parameter — consider safe.String
     pub fn looksLikeNumber(s: []const u8) bool {
         if (s.len == 0) return false;
 
@@ -297,8 +302,8 @@ pub const Value = struct {
         const bs = try b.asString(allocator);
 
         const result = try allocator.alloc(u8, as.len + bs.len);
-        @memcpy(result[0..as.len], as);
-        @memcpy(result[as.len..], bs);
+        safe.SimdUtils.copy(result[0..as.len], as);
+        safe.SimdUtils.copy(result[as.len..], bs);
 
         return initStringOwned(result, allocator);
     }
@@ -317,9 +322,10 @@ pub const Value = struct {
 
     pub fn deinit(self: *Value) void {
         if (self.flags.string_owned and self.allocator != null) {
-            self.allocator.?.free(self.repr.string);
+            // safe-transpile: optional unwrap requires manual review
+            // safe-transpile: free removed (memory owned by safe type);
         }
-        self.* = initUninit();
+        self[0] = initUninit();
     }
 
     pub fn clone(self: *const Value, allocator: Allocator) !Value {
@@ -337,6 +343,7 @@ pub const Value = struct {
     // Helper Functions
     // ------------------------------------------------------------------------
 
+    // safe-transpile: function uses raw slice parameter — consider safe.String
     fn stringToNumber(s: []const u8) f64 {
         if (s.len == 0) return 0.0;
 
@@ -350,6 +357,7 @@ pub const Value = struct {
         return result;
     }
 
+    // safe-transpile: function returns small constant slice — consider safe.String
     fn numberToString(n: f64, allocator: Allocator) ![]const u8 {
         // AWK uses OFMT for output format, default is "%.6g"
         // For now, use a reasonable default

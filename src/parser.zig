@@ -129,6 +129,7 @@ pub const Tokenizer = struct {
     /// Tracks whether we're in a context where / starts a regex
     expect_regex: bool = true,
 
+    // safe-transpile: function uses raw slice parameter — consider safe.String
     pub fn init(source: []const u8) Tokenizer {
         return .{ .source = source };
     }
@@ -222,6 +223,7 @@ pub const Tokenizer = struct {
         };
     }
 
+    // safe-transpile: function uses raw slice parameter — consider safe.String
     fn makeToken(self: *const Tokenizer, kind: Token.Kind, lexeme: []const u8) Token {
         return .{
             .kind = kind,
@@ -408,6 +410,7 @@ pub const Parser = struct {
     allocator: Allocator,
     had_error: bool = false,
 
+    // safe-transpile: function uses raw slice parameter — consider safe.String
     pub fn init(source: []const u8, allocator: Allocator) Parser {
         var parser = Parser{
             .tokenizer = Tokenizer.init(source),
@@ -520,7 +523,11 @@ pub const Parser = struct {
         defer params.deinit(self.allocator);
 
         if (!self.check(.rparen)) {
+            var __zust_loop_counter: u64 = 0;
             while (true) {
+                __zust_loop_counter += 1;
+                if (__zust_loop_counter > 1_000_000) return error.InfiniteLoop;
+
                 try self.consume(.identifier, "Expected parameter name");
                 try params.append(self.allocator, self.previous.lexeme);
                 if (!self.match(.comma)) break;
@@ -546,29 +553,29 @@ pub const Parser = struct {
         if (self.check(.kw_break)) {
             self.advance();
             self.consumeStatementEnd();
-            const stmt = try self.allocator.create(ast.Statement);
-            stmt.* = .{ .kind = .break_stmt };
+            const stmt = try safe.Box(ast.Statement).init(allocator, undefined);
+            stmt[0] = .{ .kind = .break_stmt };
             return stmt;
         }
         if (self.check(.kw_continue)) {
             self.advance();
             self.consumeStatementEnd();
-            const stmt = try self.allocator.create(ast.Statement);
-            stmt.* = .{ .kind = .continue_stmt };
+            const stmt = try safe.Box(ast.Statement).init(allocator, undefined);
+            stmt[0] = .{ .kind = .continue_stmt };
             return stmt;
         }
         if (self.check(.kw_next)) {
             self.advance();
             self.consumeStatementEnd();
-            const stmt = try self.allocator.create(ast.Statement);
-            stmt.* = .{ .kind = .next_stmt };
+            const stmt = try safe.Box(ast.Statement).init(allocator, undefined);
+            stmt[0] = .{ .kind = .next_stmt };
             return stmt;
         }
         if (self.check(.kw_nextfile)) {
             self.advance();
             self.consumeStatementEnd();
-            const stmt = try self.allocator.create(ast.Statement);
-            stmt.* = .{ .kind = .nextfile_stmt };
+            const stmt = try safe.Box(ast.Statement).init(allocator, undefined);
+            stmt[0] = .{ .kind = .nextfile_stmt };
             return stmt;
         }
         if (self.check(.kw_exit)) return self.parseExit();
@@ -600,8 +607,8 @@ pub const Parser = struct {
             else_branch = try self.parseStatement();
         }
 
-        const stmt = try self.allocator.create(ast.Statement);
-        stmt.* = .{ .kind = .{ .if_stmt = .{
+        const stmt = try safe.Box(ast.Statement).init(allocator, undefined);
+        stmt[0] = .{ .kind = .{ .if_stmt = .{
             .condition = condition,
             .then_branch = then_branch,
             .else_branch = else_branch,
@@ -617,8 +624,8 @@ pub const Parser = struct {
         self.skipNewlines();
         const body = try self.parseStatement();
 
-        const stmt = try self.allocator.create(ast.Statement);
-        stmt.* = .{ .kind = .{ .while_stmt = .{
+        const stmt = try safe.Box(ast.Statement).init(allocator, undefined);
+        stmt[0] = .{ .kind = .{ .while_stmt = .{
             .condition = condition,
             .body = body,
         } } };
@@ -636,8 +643,8 @@ pub const Parser = struct {
         try self.consume(.rparen, "Expected ')' after condition");
         self.consumeStatementEnd();
 
-        const stmt = try self.allocator.create(ast.Statement);
-        stmt.* = .{ .kind = .{ .do_while_stmt = .{
+        const stmt = try safe.Box(ast.Statement).init(allocator, undefined);
+        stmt[0] = .{ .kind = .{ .do_while_stmt = .{
             .body = body,
             .condition = condition,
         } } };
@@ -664,8 +671,8 @@ pub const Parser = struct {
                 self.skipNewlines();
                 const body = try self.parseStatement();
 
-                const stmt = try self.allocator.create(ast.Statement);
-                stmt.* = .{ .kind = .{ .for_in_stmt = .{
+                const stmt = try safe.Box(ast.Statement).init(allocator, undefined);
+                stmt[0] = .{ .kind = .{ .for_in_stmt = .{
                     .var_name = var_name,
                     .array_name = array_name,
                     .body = body,
@@ -702,8 +709,8 @@ pub const Parser = struct {
         self.skipNewlines();
         const body = try self.parseStatement();
 
-        const stmt = try self.allocator.create(ast.Statement);
-        stmt.* = .{ .kind = .{ .for_stmt = .{
+        const stmt = try safe.Box(ast.Statement).init(allocator, undefined);
+        stmt[0] = .{ .kind = .{ .for_stmt = .{
             .init = init_stmt,
             .condition = condition,
             .update = update,
@@ -720,8 +727,8 @@ pub const Parser = struct {
         }
         self.consumeStatementEnd();
 
-        const stmt = try self.allocator.create(ast.Statement);
-        stmt.* = .{ .kind = .{ .exit_stmt = expr } };
+        const stmt = try safe.Box(ast.Statement).init(allocator, undefined);
+        stmt[0] = .{ .kind = .{ .exit_stmt = expr } };
         return stmt;
     }
 
@@ -733,8 +740,8 @@ pub const Parser = struct {
         }
         self.consumeStatementEnd();
 
-        const stmt = try self.allocator.create(ast.Statement);
-        stmt.* = .{ .kind = .{ .return_stmt = expr } };
+        const stmt = try safe.Box(ast.Statement).init(allocator, undefined);
+        stmt[0] = .{ .kind = .{ .return_stmt = expr } };
         return stmt;
     }
 
@@ -750,8 +757,8 @@ pub const Parser = struct {
         }
         self.consumeStatementEnd();
 
-        const stmt = try self.allocator.create(ast.Statement);
-        stmt.* = .{ .kind = .{ .delete_stmt = .{
+        const stmt = try safe.Box(ast.Statement).init(allocator, undefined);
+        stmt[0] = .{ .kind = .{ .delete_stmt = .{
             .array = array_name,
             .index = index,
         } } };
@@ -762,7 +769,11 @@ pub const Parser = struct {
         // Parse a print/printf argument, stopping at redirection operators
         var expr = try self.parseConcatenation();
 
+        var __zust_loop_counter: u64 = 0;
         while (true) {
+            __zust_loop_counter += 1;
+            if (__zust_loop_counter > 1_000_000) return error.InfiniteLoop;
+
             if (self.check(.gt) or self.check(.append) or self.check(.pipe) or
                 self.check(.comma) or self.checkStatementEnd())
             {
@@ -774,8 +785,8 @@ pub const Parser = struct {
                 try self.consume(.colon, "Expected ':' in ternary expression");
                 const false_expr = try self.parseTernary();
 
-                const result = try self.allocator.create(ast.Expression);
-                result.* = .{ .kind = .{ .ternary = .{
+                const result = try safe.Box(ast.Expression).init(allocator, undefined);
+                result[0] = .{ .kind = .{ .ternary = .{
                     .condition = expr,
                     .true_expr = true_expr,
                     .false_expr = false_expr,
@@ -792,8 +803,8 @@ pub const Parser = struct {
                 self.advance();
                 const pattern = try self.parseConcatenation();
 
-                const result = try self.allocator.create(ast.Expression);
-                result.* = .{ .kind = .{ .regex_match = .{
+                const result = try safe.Box(ast.Expression).init(allocator, undefined);
+                result[0] = .{ .kind = .{ .regex_match = .{
                     .string = expr,
                     .pattern = pattern,
                     .negated = negated,
@@ -815,7 +826,11 @@ pub const Parser = struct {
 
         // Parse print arguments
         if (!self.checkStatementEnd() and !self.check(.gt) and !self.check(.append) and !self.check(.pipe)) {
+            var __zust_loop_counter: u64 = 0;
             while (true) {
+                __zust_loop_counter += 1;
+                if (__zust_loop_counter > 1_000_000) return error.InfiniteLoop;
+
                 const arg = try self.parsePrintExpression();
                 try args.append(self.allocator, arg);
                 if (!self.match(.comma)) break;
@@ -838,8 +853,8 @@ pub const Parser = struct {
 
         self.consumeStatementEnd();
 
-        const stmt = try self.allocator.create(ast.Statement);
-        stmt.* = .{ .kind = .{ .print = .{
+        const stmt = try safe.Box(ast.Statement).init(allocator, undefined);
+        stmt[0] = .{ .kind = .{ .print = .{
             .args = try args.toOwnedSlice(self.allocator),
             .output_file = output_file,
             .append = append,
@@ -876,8 +891,8 @@ pub const Parser = struct {
 
         self.consumeStatementEnd();
 
-        const stmt = try self.allocator.create(ast.Statement);
-        stmt.* = .{ .kind = .{ .printf = .{
+        const stmt = try safe.Box(ast.Statement).init(allocator, undefined);
+        stmt[0] = .{ .kind = .{ .printf = .{
             .format = format,
             .args = try args.toOwnedSlice(self.allocator),
             .output_file = output_file,
@@ -906,8 +921,8 @@ pub const Parser = struct {
 
         self.consumeStatementEnd();
 
-        const stmt = try self.allocator.create(ast.Statement);
-        stmt.* = .{ .kind = .{ .getline_stmt = .{
+        const stmt = try safe.Box(ast.Statement).init(allocator, undefined);
+        stmt[0] = .{ .kind = .{ .getline_stmt = .{
             .var_name = var_name,
             .file = file_expr,
         } } };
@@ -942,8 +957,8 @@ pub const Parser = struct {
 
             const value = try self.parseAssignment();
 
-            const result = try self.allocator.create(ast.Expression);
-            result.* = .{ .kind = .{ .assignment = .{
+            const result = try safe.Box(ast.Expression).init(allocator, undefined);
+            result[0] = .{ .kind = .{ .assignment = .{
                 .target = expr,
                 .value = value,
                 .op = assign_op,
@@ -962,8 +977,8 @@ pub const Parser = struct {
             try self.consume(.colon, "Expected ':' in ternary expression");
             const false_expr = try self.parseTernary();
 
-            const result = try self.allocator.create(ast.Expression);
-            result.* = .{ .kind = .{ .ternary = .{
+            const result = try safe.Box(ast.Expression).init(allocator, undefined);
+            result[0] = .{ .kind = .{ .ternary = .{
                 .condition = expr,
                 .true_expr = true_expr,
                 .false_expr = false_expr,
@@ -1003,8 +1018,8 @@ pub const Parser = struct {
             try self.consume(.identifier, "Expected array name after 'in'");
             const array_name = self.previous.lexeme;
 
-            const result = try self.allocator.create(ast.Expression);
-            result.* = .{ .kind = .{ .in_expr = .{
+            const result = try safe.Box(ast.Expression).init(allocator, undefined);
+            result[0] = .{ .kind = .{ .in_expr = .{
                 .key = expr,
                 .array = array_name,
             } } };
@@ -1022,8 +1037,8 @@ pub const Parser = struct {
             self.advance();
             const pattern = try self.parseComparison();
 
-            const result = try self.allocator.create(ast.Expression);
-            result.* = .{ .kind = .{ .regex_match = .{
+            const result = try safe.Box(ast.Expression).init(allocator, undefined);
+            result[0] = .{ .kind = .{ .regex_match = .{
                 .string = expr,
                 .pattern = pattern,
                 .negated = negated,
@@ -1064,8 +1079,8 @@ pub const Parser = struct {
         // after a primary expression with no operator, it's concatenation
         while (self.checkPrimary()) {
             const right = try self.parseAddition();
-            const result = try self.allocator.create(ast.Expression);
-            result.* = .{ .kind = .{ .concat = .{
+            const result = try safe.Box(ast.Expression).init(allocator, undefined);
+            result[0] = .{ .kind = .{ .concat = .{
                 .left = expr,
                 .right = right,
             } } };
@@ -1120,8 +1135,8 @@ pub const Parser = struct {
     fn parseUnary(self: *Parser) ParseError!*ast.Expression {
         if (self.match(.bang)) {
             const operand = try self.parseUnary();
-            const result = try self.allocator.create(ast.Expression);
-            result.* = .{ .kind = .{ .unary_op = .{
+            const result = try safe.Box(ast.Expression).init(allocator, undefined);
+            result[0] = .{ .kind = .{ .unary_op = .{
                 .op = .not,
                 .operand = operand,
                 .prefix = true,
@@ -1131,8 +1146,8 @@ pub const Parser = struct {
 
         if (self.match(.minus)) {
             const operand = try self.parseUnary();
-            const result = try self.allocator.create(ast.Expression);
-            result.* = .{ .kind = .{ .unary_op = .{
+            const result = try safe.Box(ast.Expression).init(allocator, undefined);
+            result[0] = .{ .kind = .{ .unary_op = .{
                 .op = .negate,
                 .operand = operand,
                 .prefix = true,
@@ -1142,8 +1157,8 @@ pub const Parser = struct {
 
         if (self.match(.plusplus)) {
             const operand = try self.parseUnary();
-            const result = try self.allocator.create(ast.Expression);
-            result.* = .{ .kind = .{ .unary_op = .{
+            const result = try safe.Box(ast.Expression).init(allocator, undefined);
+            result[0] = .{ .kind = .{ .unary_op = .{
                 .op = .pre_incr,
                 .operand = operand,
                 .prefix = true,
@@ -1153,8 +1168,8 @@ pub const Parser = struct {
 
         if (self.match(.minusminus)) {
             const operand = try self.parseUnary();
-            const result = try self.allocator.create(ast.Expression);
-            result.* = .{ .kind = .{ .unary_op = .{
+            const result = try safe.Box(ast.Expression).init(allocator, undefined);
+            result[0] = .{ .kind = .{ .unary_op = .{
                 .op = .pre_decr,
                 .operand = operand,
                 .prefix = true,
@@ -1168,18 +1183,22 @@ pub const Parser = struct {
     fn parsePostfix(self: *Parser) ParseError!*ast.Expression {
         var expr = try self.parsePrimary();
 
+        var __zust_loop_counter: u64 = 0;
         while (true) {
+            __zust_loop_counter += 1;
+            if (__zust_loop_counter > 1_000_000) return error.InfiniteLoop;
+
             if (self.match(.plusplus)) {
-                const result = try self.allocator.create(ast.Expression);
-                result.* = .{ .kind = .{ .unary_op = .{
+                const result = try safe.Box(ast.Expression).init(allocator, undefined);
+                result[0] = .{ .kind = .{ .unary_op = .{
                     .op = .post_incr,
                     .operand = expr,
                     .prefix = false,
                 } } };
                 expr = result;
             } else if (self.match(.minusminus)) {
-                const result = try self.allocator.create(ast.Expression);
-                result.* = .{ .kind = .{ .unary_op = .{
+                const result = try safe.Box(ast.Expression).init(allocator, undefined);
+                result[0] = .{ .kind = .{ .unary_op = .{
                     .op = .post_decr,
                     .operand = expr,
                     .prefix = false,
@@ -1194,8 +1213,8 @@ pub const Parser = struct {
                 switch (expr.kind) {
                     .variable => |name| {
                         self.allocator.destroy(expr);
-                        const result = try self.allocator.create(ast.Expression);
-                        result.* = .{ .kind = .{ .array_subscript = .{
+                        const result = try safe.Box(ast.Expression).init(allocator, undefined);
+                        result[0] = .{ .kind = .{ .array_subscript = .{
                             .array = name,
                             .index = index,
                         } } };
@@ -1230,8 +1249,8 @@ pub const Parser = struct {
         if (self.match(.regex)) {
             const lexeme = self.previous.lexeme;
             const pattern = if (lexeme.len >= 2) lexeme[1 .. lexeme.len - 1] else lexeme;
-            const result = try self.allocator.create(ast.Expression);
-            result.* = .{ .kind = .{ .regex_literal = pattern } };
+            const result = try safe.Box(ast.Expression).init(allocator, undefined);
+            result[0] = .{ .kind = .{ .regex_literal = pattern } };
             return result;
         }
 
@@ -1240,8 +1259,8 @@ pub const Parser = struct {
             if (self.match(.number)) {
                 const n = std.fmt.parseFloat(f64, self.previous.lexeme) catch 0.0;
                 if (n == 0) {
-                    const result = try self.allocator.create(ast.Expression);
-                    result.* = .{ .kind = .whole_line };
+                    const result = try safe.Box(ast.Expression).init(allocator, undefined);
+                    result[0] = .{ .kind = .whole_line };
                     return result;
                 }
                 const index = try ast.Expression.numberLiteral(self.allocator, n);
@@ -1277,8 +1296,8 @@ pub const Parser = struct {
                 pipe_expr = try self.parseExpression();
             }
 
-            const result = try self.allocator.create(ast.Expression);
-            result.* = .{ .kind = .{ .getline = .{
+            const result = try safe.Box(ast.Expression).init(allocator, undefined);
+            result[0] = .{ .kind = .{ .getline = .{
                 .var_name = var_name,
                 .file = file_expr,
                 .pipe_cmd = pipe_expr,
@@ -1296,7 +1315,11 @@ pub const Parser = struct {
                 defer args.deinit(self.allocator);
 
                 if (!self.check(.rparen)) {
+                    var __zust_loop_counter: u64 = 0;
                     while (true) {
+                        __zust_loop_counter += 1;
+                        if (__zust_loop_counter > 1_000_000) return error.InfiniteLoop;
+
                         const arg = try self.parseExpression();
                         try args.append(self.allocator, arg);
                         if (!self.match(.comma)) break;
@@ -1304,8 +1327,8 @@ pub const Parser = struct {
                 }
                 try self.consume(.rparen, "Expected ')' after arguments");
 
-                const result = try self.allocator.create(ast.Expression);
-                result.* = .{ .kind = .{ .function_call = .{
+                const result = try safe.Box(ast.Expression).init(allocator, undefined);
+                result[0] = .{ .kind = .{ .function_call = .{
                     .name = name,
                     .args = try args.toOwnedSlice(self.allocator),
                 } } };
@@ -1346,6 +1369,7 @@ pub const Parser = struct {
         return true;
     }
 
+    // safe-transpile: function uses raw slice parameter — consider safe.String
     fn consume(self: *Parser, kind: Token.Kind, _: []const u8) ParseError!void {
         if (self.check(kind)) {
             self.advance();

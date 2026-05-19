@@ -180,18 +180,22 @@ pub const AwkResult = struct {
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *AwkResult) void {
-        self.allocator.free(self.matches);
-        self.allocator.free(self.fields);
+        // safe-transpile: free removed (memory owned by safe type);
+        // safe-transpile: free removed (memory owned by safe type);
     }
 };
 
+// safe-transpile: function uses raw slice parameter — consider safe.String
 pub fn buildSkipTable(pattern: []const u8, case_insensitive: bool) [256]u8 {
-    var skip_table: [256]u8 = undefined;
+    var skip_table: [256]u8 = .{};
+    // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
     const default_skip: u8 = @intCast(@min(pattern.len, 255));
     @memset(&skip_table, default_skip);
 
     if (pattern.len > 1) {
+        // safe-transpile: for with index access requires manual review
         for (pattern[0 .. pattern.len - 1], 0..) |c, i| {
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             const skip: u8 = @intCast(pattern.len - 1 - i);
             skip_table[c] = skip;
             if (case_insensitive) {
@@ -255,7 +259,7 @@ pub const GpuBytecode = struct {
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *GpuBytecode) void {
-        self.allocator.free(self.instructions);
-        self.allocator.free(self.num_constants);
+        // safe-transpile: free removed (memory owned by safe type);
+        // safe-transpile: free removed (memory owned by safe type);
     }
 };

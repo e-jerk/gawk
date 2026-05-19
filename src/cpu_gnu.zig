@@ -11,6 +11,7 @@ const SubstitutionResult = gpu.SubstitutionResult;
 /// making it difficult to extract just the pattern matching and field splitting.
 /// This backend delegates to the optimized implementation which provides
 /// equivalent POSIX AWK semantics.
+// safe-transpile: function uses raw slice parameter — consider safe.String
 pub fn processAwk(
     text: []const u8,
     pattern: []const u8,
@@ -23,6 +24,7 @@ pub fn processAwk(
 
 /// GNU gawk backend for gsub/sub operations.
 /// Delegates to optimized backend for consistent behavior.
+// safe-transpile: function uses raw slice parameter — consider safe.String
 pub fn processSubstitution(
     text: []const u8,
     pattern: []const u8,

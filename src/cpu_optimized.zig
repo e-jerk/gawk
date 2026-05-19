@@ -26,6 +26,7 @@ const UPPER_Z_VEC16: Vec16 = @splat('Z');
 const CASE_DIFF_VEC16: Vec16 = @splat(32);
 
 /// CPU-based AWK pattern matching and field extraction with SIMD optimization
+// safe-transpile: function uses raw slice parameter — consider safe.String
 pub fn processAwk(
     text: []const u8,
     pattern: []const u8,
@@ -38,7 +39,7 @@ pub fn processAwk(
     errdefer fields.deinit(allocator);
 
     // Pre-compute lowercase pattern if case insensitive
-    var lower_pattern_buf: [1024]u8 = undefined;
+    var lower_pattern_buf: [1024]u8 = .{};
     const search_pattern = if (options.case_insensitive and pattern.len > 0 and pattern.len <= 1024) blk: {
         toLowerSlice(pattern, lower_pattern_buf[0..pattern.len]);
         break :blk lower_pattern_buf[0..pattern.len];
@@ -69,13 +70,18 @@ pub fn processAwk(
 
         if (found_match) {
             // Split fields
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             const match_idx: u32 = @intCast(matches.items.len);
             const field_count = try splitFieldsSIMD(text, line_start, line_end, options.field_separator, &fields, match_idx, allocator);
 
             try matches.append(allocator, .{
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 .line_start = @intCast(line_start),
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 .line_end = @intCast(line_end),
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 .match_start = @intCast(match_pos),
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 .match_end = @intCast(if (pattern.len > 0) match_pos + pattern.len else 0),
                 .line_num = line_num,
                 .field_count = field_count,
@@ -97,6 +103,7 @@ pub fn processAwk(
 }
 
 /// CPU-based AWK pattern matching with regex support
+// safe-transpile: function uses raw slice parameter — consider safe.String
 pub fn processAwkRegex(
     text: []const u8,
     pattern: []const u8,
@@ -136,6 +143,7 @@ pub fn processAwkRegex(
 
         if (found_match) {
             // Split fields
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             const match_idx: u32 = @intCast(matches.items.len);
             const field_count = try splitFieldsSIMD(text, line_start, line_end, options.field_separator, &fields, match_idx, allocator);
 
@@ -143,12 +151,16 @@ pub fn processAwkRegex(
             var match_start_pos: u32 = 0;
             var match_end_pos: u32 = 0;
             if (match_result) |match_info| {
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 match_start_pos = @intCast(match_info.start);
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 match_end_pos = @intCast(match_info.end);
             }
 
             try matches.append(allocator, .{
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 .line_start = @intCast(line_start),
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 .line_end = @intCast(line_end),
                 .match_start = match_start_pos,
                 .match_end = match_end_pos,
@@ -172,6 +184,7 @@ pub fn processAwkRegex(
 }
 
 /// SIMD-optimized newline finder
+// safe-transpile: function uses raw slice parameter — consider safe.String
 fn findNextNewlineSIMD(text: []const u8, start: usize) usize {
     var i = start;
 
@@ -199,6 +212,7 @@ fn findNextNewlineSIMD(text: []const u8, start: usize) usize {
 }
 
 /// SIMD-optimized line search
+// safe-transpile: function uses raw slice parameter — consider safe.String
 fn searchLineSIMD(line: []const u8, pattern: []const u8, skip_table: *const [256]u8, case_insensitive: bool, match_pos: *usize) bool {
     if (pattern.len == 0) return true;
     if (line.len < pattern.len) return false;
@@ -207,7 +221,7 @@ fn searchLineSIMD(line: []const u8, pattern: []const u8, skip_table: *const [256
 
     while (pos + pattern.len <= line.len) {
         if (matchAtPositionSIMD(line, pos, pattern, case_insensitive)) {
-            match_pos.* = pos;
+            match_pos[0] = pos;
             return true;
         }
 
@@ -223,6 +237,7 @@ fn searchLineSIMD(line: []const u8, pattern: []const u8, skip_table: *const [256
 }
 
 /// SIMD-optimized pattern matching at a specific position
+// safe-transpile: function uses raw slice parameter — consider safe.String
 inline fn matchAtPositionSIMD(text: []const u8, pos: usize, pattern: []const u8, case_insensitive: bool) bool {
     if (pos + pattern.len > text.len) return false;
 
@@ -271,6 +286,7 @@ inline fn toLowerChar(c: u8) u8 {
 }
 
 /// Convert slice to lowercase using SIMD
+// safe-transpile: function uses raw slice parameter — consider safe.String
 inline fn toLowerSlice(src: []const u8, dst: []u8) void {
     var i: usize = 0;
     // Process 16 bytes at a time
@@ -288,6 +304,7 @@ inline fn toLowerSlice(src: []const u8, dst: []u8) void {
 }
 
 /// SIMD-optimized field splitting
+// safe-transpile: function uses raw slice parameter — consider safe.String
 fn splitFieldsSIMD(
     text: []const u8,
     line_start: usize,
@@ -322,12 +339,14 @@ fn splitFieldsSIMD(
                     const is_sep = line[i + j] == ' ' or line[i + j] == '\t';
                     if (!is_sep and !in_field) {
                         in_field = true;
+                        // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                         field_start = @intCast(i + j);
                     } else if (is_sep and in_field) {
                         try fields.append(allocator, .{
                             .line_idx = line_idx,
                             .field_idx = field_idx,
                             .start_offset = field_start,
+                            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                             .end_offset = @intCast(i + j),
                         });
                         field_idx += 1;
@@ -338,6 +357,7 @@ fn splitFieldsSIMD(
                 // No whitespace in this chunk
                 if (!in_field) {
                     in_field = true;
+                    // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                     field_start = @intCast(i);
                 }
             }
@@ -350,12 +370,14 @@ fn splitFieldsSIMD(
         const is_sep = isSeparatorSIMD(line[i], field_sep);
         if (!is_sep and !in_field) {
             in_field = true;
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             field_start = @intCast(i);
         } else if (is_sep and in_field) {
             try fields.append(allocator, .{
                 .line_idx = line_idx,
                 .field_idx = field_idx,
                 .start_offset = field_start,
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 .end_offset = @intCast(i),
             });
             field_idx += 1;
@@ -369,6 +391,7 @@ fn splitFieldsSIMD(
             .line_idx = line_idx,
             .field_idx = field_idx,
             .start_offset = field_start,
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             .end_offset = @intCast(line.len),
         });
         field_idx += 1;
@@ -377,6 +400,7 @@ fn splitFieldsSIMD(
     return field_idx - 1;
 }
 
+// safe-transpile: function uses raw slice parameter — consider safe.String
 inline fn isSeparatorSIMD(c: u8, sep: []const u8) bool {
     // Default whitespace separator
     if (sep.len == 0) return c == ' ' or c == '\t';
@@ -388,6 +412,7 @@ inline fn isSeparatorSIMD(c: u8, sep: []const u8) bool {
 }
 
 /// CPU-based gsub implementation - find all pattern matches with SIMD
+// safe-transpile: function uses raw slice parameter — consider safe.String
 pub fn findSubstitutions(
     text: []const u8,
     pattern: []const u8,
@@ -400,7 +425,7 @@ pub fn findSubstitutions(
     if (pattern.len == 0) return try matches.toOwnedSlice(allocator);
 
     // Pre-compute lowercase pattern if case insensitive
-    var lower_pattern_buf: [1024]u8 = undefined;
+    var lower_pattern_buf: [1024]u8 = .{};
     const search_pattern = if (options.case_insensitive and pattern.len <= 1024) blk: {
         toLowerSlice(pattern, lower_pattern_buf[0..pattern.len]);
         break :blk lower_pattern_buf[0..pattern.len];
@@ -417,7 +442,9 @@ pub fn findSubstitutions(
 
         if (matchAtPositionSIMD(text, pos, search_pattern, options.case_insensitive)) {
             try matches.append(allocator, .{
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 .position = @intCast(pos),
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 .match_len = @intCast(pattern.len),
                 .line_num = line_num,
             });
@@ -436,6 +463,7 @@ pub fn findSubstitutions(
 }
 
 /// CPU-based gsub implementation with regex support
+// safe-transpile: function uses raw slice parameter — consider safe.String
 pub fn findSubstitutionsRegex(
     text: []const u8,
     pattern: []const u8,
@@ -468,7 +496,9 @@ pub fn findSubstitutionsRegex(
         if (match_opt) |*match| {
             defer match.deinit();
             try matches.append(allocator, .{
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 .position = @intCast(match.start),
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 .match_len = @intCast(match.end - match.start),
                 .line_num = line_num,
             });
@@ -484,6 +514,8 @@ pub fn findSubstitutionsRegex(
 }
 
 /// Apply regex substitutions to text (handles variable-length matches)
+// safe-transpile: function uses raw slice parameter — consider safe.String
+// safe-transpile: function returns small constant slice — consider safe.String
 pub fn applySubstitutionsRegex(
     text: []const u8,
     substitutions: []const SubstitutionResult,
@@ -492,7 +524,7 @@ pub fn applySubstitutionsRegex(
 ) ![]u8 {
     if (substitutions.len == 0) {
         const result = try allocator.alloc(u8, text.len);
-        @memcpy(result, text);
+        safe.SimdUtils.copy(result, text);
         return result;
     }
 
@@ -515,13 +547,13 @@ pub fn applySubstitutionsRegex(
         // Copy text before match
         const before_len = match_pos - src_pos;
         if (before_len > 0) {
-            @memcpy(result[dst_pos..][0..before_len], text[src_pos..][0..before_len]);
+            safe.SimdUtils.copy(result[dst_pos..][0..before_len], text[src_pos..][0..before_len]);
             dst_pos += before_len;
         }
 
         // Copy replacement
         if (replacement.len > 0) {
-            @memcpy(result[dst_pos..][0..replacement.len], replacement);
+            safe.SimdUtils.copy(result[dst_pos..][0..replacement.len], replacement);
             dst_pos += replacement.len;
         }
 
@@ -531,13 +563,15 @@ pub fn applySubstitutionsRegex(
     // Copy remaining text
     const remaining = text.len - src_pos;
     if (remaining > 0) {
-        @memcpy(result[dst_pos..][0..remaining], text[src_pos..][0..remaining]);
+        safe.SimdUtils.copy(result[dst_pos..][0..remaining], text[src_pos..][0..remaining]);
     }
 
     return result;
 }
 
 /// Apply substitutions to text with SIMD-optimized memcpy
+// safe-transpile: function uses raw slice parameter — consider safe.String
+// safe-transpile: function returns small constant slice — consider safe.String
 pub fn applySubstitutions(
     text: []const u8,
     substitutions: []const SubstitutionResult,
@@ -547,12 +581,17 @@ pub fn applySubstitutions(
 ) ![]u8 {
     if (substitutions.len == 0) {
         const result = try allocator.alloc(u8, text.len);
-        @memcpy(result, text);
+        safe.SimdUtils.copy(result, text);
         return result;
     }
 
     // Calculate new length
+    // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
+    // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
     const len_diff: isize = @as(isize, @intCast(replacement.len)) - @as(isize, @intCast(pattern_len));
+    // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
+    // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
+    // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
     const new_len: usize = @intCast(@as(isize, @intCast(text.len)) + len_diff * @as(isize, @intCast(substitutions.len)));
 
     var result = try allocator.alloc(u8, new_len);
@@ -566,13 +605,13 @@ pub fn applySubstitutions(
         // Copy text before match (SIMD-friendly memcpy)
         const before_len = match_pos - src_pos;
         if (before_len > 0) {
-            @memcpy(result[dst_pos..][0..before_len], text[src_pos..][0..before_len]);
+            safe.SimdUtils.copy(result[dst_pos..][0..before_len], text[src_pos..][0..before_len]);
             dst_pos += before_len;
         }
 
         // Copy replacement
         if (replacement.len > 0) {
-            @memcpy(result[dst_pos..][0..replacement.len], replacement);
+            safe.SimdUtils.copy(result[dst_pos..][0..replacement.len], replacement);
             dst_pos += replacement.len;
         }
 
@@ -582,7 +621,7 @@ pub fn applySubstitutions(
     // Copy remaining text
     const remaining = text.len - src_pos;
     if (remaining > 0) {
-        @memcpy(result[dst_pos..][0..remaining], text[src_pos..][0..remaining]);
+        safe.SimdUtils.copy(result[dst_pos..][0..remaining], text[src_pos..][0..remaining]);
     }
 
     return result;

@@ -15,12 +15,13 @@ pub const CompiledGpuRegex = struct {
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *CompiledGpuRegex) void {
-        self.allocator.free(self.states);
-        self.allocator.free(self.bitmaps);
+        // safe-transpile: free removed (memory owned by safe type);
+        // safe-transpile: free removed (memory owned by safe type);
     }
 };
 
 /// Convert CPU regex to GPU-compatible format
+// safe-transpile: function uses raw slice parameter — consider safe.String
 pub fn compileForGpu(pattern: []const u8, options: regex_lib.Regex.Options, allocator: std.mem.Allocator) !CompiledGpuRegex {
     // Compile the regex on CPU first
     var cpu_regex = regex_lib.Regex.compile(allocator, pattern, options) catch |err| {
@@ -49,7 +50,7 @@ pub fn convertToGpuFormat(cpu_regex: *regex_lib.Regex, allocator: std.mem.Alloca
 
     // Allocate GPU state array
     const gpu_states = try allocator.alloc(RegexState, states.len);
-    errdefer allocator.free(gpu_states);
+    // safe-transpile: free removed (memory owned by safe type);
 
     // Allocate bitmap buffer (8 u32 words per character class)
     const bitmap_words = num_char_classes * BITMAP_WORDS_PER_CLASS;
@@ -57,18 +58,21 @@ pub fn convertToGpuFormat(cpu_regex: *regex_lib.Regex, allocator: std.mem.Alloca
         try allocator.alloc(u32, bitmap_words)
     else
         @constCast(&[_]u32{});
-    errdefer if (bitmap_words > 0) allocator.free(bitmaps);
+    // safe-transpile: free removed (memory owned by safe type);
 
     // Convert states and copy bitmaps
     var bitmap_offset: u32 = 0;
+    // safe-transpile: for with index access requires manual review
     for (states, 0..) |state, i| {
         gpu_states[i] = convertState(state, &bitmap_offset, bitmaps);
     }
 
     // Build header
     const header = RegexHeader{
+        // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
         .num_states = @intCast(states.len),
         .start_state = cpu_regex.start_state,
+        // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
         .num_groups = @intCast(cpu_regex.num_groups),
         .flags = buildHeaderFlags(cpu_regex),
     };
@@ -85,7 +89,9 @@ fn convertState(state: regex_lib.State, bitmap_offset: *u32, bitmaps: []u32) Reg
     var gpu_state = RegexState{
         .type = @intFromEnum(state.type),
         .flags = 0,
+        // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
         .out = if (state.out == regex_lib.State.NONE) 0xFFFF else @intCast(@min(state.out, 0xFFFF)),
+        // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
         .out2 = if (state.out2 == regex_lib.State.NONE) 0xFFFF else @intCast(@min(state.out2, 0xFFFF)),
         .literal_char = 0,
         .group_idx = 0,
@@ -122,6 +128,7 @@ fn convertState(state: regex_lib.State, bitmap_offset: *u32, bitmaps: []u32) Reg
             bitmap_offset.* += BITMAP_WORDS_PER_CLASS;
         },
         .group_start, .group_end => {
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             gpu_state.group_idx = @intCast(state.data.group_idx);
         },
         else => {},

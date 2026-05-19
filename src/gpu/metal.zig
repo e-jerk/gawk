@@ -84,6 +84,7 @@ pub const MetalAwk = struct {
         const is_high_perf = has_unified and max_threads >= 1024;
 
         const capabilities = mod.GpuCapabilities{
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             .max_threads_per_group = @intCast(max_threads),
             .max_buffer_size = @min(max_buffer_len, MAX_GPU_BUFFER_SIZE),
             .recommended_memory = recommended_memory,
@@ -91,8 +92,8 @@ pub const MetalAwk = struct {
             .device_type = if (is_high_perf) .discrete else .integrated,
         };
 
-        const self = try allocator.create(Self);
-        self.* = Self{
+        const self = try safe.Box(Self).init(allocator, undefined);
+        self[0] = Self{
             .device = device,
             .command_queue = command_queue,
             .pattern_match_pipeline = pattern_match_pipeline,
@@ -121,6 +122,7 @@ pub const MetalAwk = struct {
         return self.vm_pipeline != null;
     }
 
+    // safe-transpile: function uses raw slice parameter — consider safe.String
     pub fn processAwk(self: *Self, text: []const u8, pattern: []const u8, options: AwkOptions, allocator: std.mem.Allocator) !AwkResult {
         if (text.len > MAX_GPU_BUFFER_SIZE) return error.TextTooLarge;
 
@@ -131,16 +133,21 @@ pub const MetalAwk = struct {
         defer line_lengths.deinit(allocator);
 
         var line_start: usize = 0;
+        // safe-transpile: for with index access requires manual review
         for (text, 0..) |c, i| {
             if (c == '\n') {
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 try line_offsets.append(allocator, @intCast(line_start));
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 try line_lengths.append(allocator, @intCast(i - line_start));
                 line_start = i + 1;
             }
         }
         // Handle last line without newline
         if (line_start < text.len) {
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             try line_offsets.append(allocator, @intCast(line_start));
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             try line_lengths.append(allocator, @intCast(text.len - line_start));
         }
 
@@ -159,7 +166,7 @@ pub const MetalAwk = struct {
         var text_buffer = self.device.newBufferWithLengthOptions(text.len, mtl.MTLResourceOptions.MTLResourceCPUCacheModeDefaultCache) orelse return error.BufferCreationFailed;
         defer text_buffer.release();
         if (text_buffer.contents()) |ptr| {
-            @memcpy(@as([*]u8, @ptrCast(ptr))[0..text.len], text);
+            safe.SimdUtils.copy(@as([*]u8, @ptrCast(ptr))[0..text.len], text);
         }
 
         const pattern_len = if (pattern.len > 0) pattern.len else 1;
@@ -167,7 +174,7 @@ pub const MetalAwk = struct {
         defer pattern_buffer.release();
         if (pattern.len > 0) {
             if (pattern_buffer.contents()) |ptr| {
-                @memcpy(@as([*]u8, @ptrCast(ptr))[0..pattern.len], pattern);
+                safe.SimdUtils.copy(@as([*]u8, @ptrCast(ptr))[0..pattern.len], pattern);
             }
         }
 
@@ -175,13 +182,17 @@ pub const MetalAwk = struct {
         var skip_buffer = self.device.newBufferWithLengthOptions(256, mtl.MTLResourceOptions.MTLResourceCPUCacheModeDefaultCache) orelse return error.BufferCreationFailed;
         defer skip_buffer.release();
         if (skip_buffer.contents()) |ptr| {
-            @memcpy(@as([*]u8, @ptrCast(ptr))[0..256], &skip_table);
+            safe.SimdUtils.copy(@as([*]u8, @ptrCast(ptr))[0..256], &skip_table);
         }
 
         const config = AwkConfig{
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             .text_len = @intCast(text.len),
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             .pattern_len = @intCast(pattern.len),
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             .field_sep_len = @intCast(options.field_separator.len),
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             .num_fields_requested = @intCast(options.requested_fields.len),
             .flags = options.toFlags(),
             .max_results = MAX_RESULTS,
@@ -191,7 +202,8 @@ pub const MetalAwk = struct {
         var config_buffer = self.device.newBufferWithLengthOptions(@sizeOf(AwkConfig), mtl.MTLResourceOptions.MTLResourceCPUCacheModeDefaultCache) orelse return error.BufferCreationFailed;
         defer config_buffer.release();
         if (config_buffer.contents()) |ptr| {
-            @as(*AwkConfig, @ptrCast(@alignCast(ptr))).* = config;
+            @as(*AwkConfig, // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+                @ptrCast(@alignCast(ptr))).* = config;
         }
 
         const results_size = @sizeOf(AwkMatchResult) * MAX_RESULTS;
@@ -200,20 +212,21 @@ pub const MetalAwk = struct {
 
         var counters_buffer = self.device.newBufferWithLengthOptions(8, mtl.MTLResourceOptions.MTLResourceCPUCacheModeDefaultCache) orelse return error.BufferCreationFailed;
         defer counters_buffer.release();
-        const counters_ptr: *[2]u32 = @ptrCast(@alignCast(counters_buffer.contents()));
+        const counters_ptr: *[2]u32 = // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+            @ptrCast(@alignCast(counters_buffer.contents()));
         counters_ptr[0] = 0;
         counters_ptr[1] = 0;
 
         var line_offsets_buffer = self.device.newBufferWithLengthOptions(line_offsets.items.len * @sizeOf(u32), mtl.MTLResourceOptions.MTLResourceCPUCacheModeDefaultCache) orelse return error.BufferCreationFailed;
         defer line_offsets_buffer.release();
         if (line_offsets_buffer.contents()) |ptr| {
-            @memcpy(@as([*]u32, @ptrCast(@alignCast(ptr)))[0..line_offsets.items.len], line_offsets.items);
+            safe.SimdUtils.copy(@as([*]u32, @ptrCast(@alignCast(ptr)))[0..line_offsets.items.len], line_offsets.items);
         }
 
         var line_lengths_buffer = self.device.newBufferWithLengthOptions(line_lengths.items.len * @sizeOf(u32), mtl.MTLResourceOptions.MTLResourceCPUCacheModeDefaultCache) orelse return error.BufferCreationFailed;
         defer line_lengths_buffer.release();
         if (line_lengths_buffer.contents()) |ptr| {
-            @memcpy(@as([*]u32, @ptrCast(@alignCast(ptr)))[0..line_lengths.items.len], line_lengths.items);
+            safe.SimdUtils.copy(@as([*]u32, @ptrCast(@alignCast(ptr)))[0..line_lengths.items.len], line_lengths.items);
         }
 
         // Execute pattern matching
@@ -244,18 +257,21 @@ pub const MetalAwk = struct {
         const num_to_copy = @min(match_count, MAX_RESULTS);
         const matches = try allocator.alloc(AwkMatchResult, num_to_copy);
         if (num_to_copy > 0) {
-            const results_ptr: [*]AwkMatchResult = @ptrCast(@alignCast(results_buffer.contents()));
-            @memcpy(matches, results_ptr[0..num_to_copy]);
+            const results_ptr: [*]AwkMatchResult = // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+                @ptrCast(@alignCast(results_buffer.contents()));
+            safe.SimdUtils.copy(matches, results_ptr[0..num_to_copy]);
         }
 
         // Do field splitting on CPU and update field_count for NF support
         var fields: std.ArrayListUnmanaged(FieldInfo) = .{};
+        // safe-transpile: for with index access requires manual review
         for (matches, 0..) |*match, idx| {
             const line = text[match.line_start..match.line_end];
             var field_idx: u32 = 1;
             var field_start: u32 = 0;
             var in_field = false;
 
+            // safe-transpile: for with index access requires manual review
             for (line, 0..) |c, i| {
                 var is_sep = false;
                 for (options.field_separator) |s| {
@@ -267,12 +283,15 @@ pub const MetalAwk = struct {
 
                 if (!is_sep and !in_field) {
                     in_field = true;
+                    // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                     field_start = @intCast(i);
                 } else if (is_sep and in_field) {
                     try fields.append(allocator, .{
+                        // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                         .line_idx = @intCast(idx),
                         .field_idx = field_idx,
                         .start_offset = field_start,
+                        // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                         .end_offset = @intCast(i),
                     });
                     field_idx += 1;
@@ -282,9 +301,11 @@ pub const MetalAwk = struct {
 
             if (in_field) {
                 try fields.append(allocator, .{
+                    // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                     .line_idx = @intCast(idx),
                     .field_idx = field_idx,
                     .start_offset = field_start,
+                    // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                     .end_offset = @intCast(line.len),
                 });
                 field_idx += 1;
@@ -298,12 +319,14 @@ pub const MetalAwk = struct {
             .matches = matches,
             .fields = try fields.toOwnedSlice(allocator),
             .total_matches = match_count,
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             .total_lines = @intCast(num_lines),
             .allocator = allocator,
         };
     }
 
     /// GPU-accelerated regex pattern matching
+    // safe-transpile: function uses raw slice parameter — consider safe.String
     pub fn processAwkRegex(self: *Self, text: []const u8, pattern: []const u8, options: AwkOptions, allocator: std.mem.Allocator) !AwkResult {
         if (text.len > MAX_GPU_BUFFER_SIZE) return error.TextTooLarge;
 
@@ -320,15 +343,20 @@ pub const MetalAwk = struct {
         defer line_lengths.deinit(allocator);
 
         var line_start: usize = 0;
+        // safe-transpile: for with index access requires manual review
         for (text, 0..) |c, i| {
             if (c == '\n') {
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 try line_offsets.append(allocator, @intCast(line_start));
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 try line_lengths.append(allocator, @intCast(i - line_start));
                 line_start = i + 1;
             }
         }
         if (line_start < text.len) {
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             try line_offsets.append(allocator, @intCast(line_start));
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             try line_lengths.append(allocator, @intCast(text.len - line_start));
         }
 
@@ -347,7 +375,7 @@ pub const MetalAwk = struct {
         var text_buffer = self.device.newBufferWithLengthOptions(text.len, mtl.MTLResourceOptions.MTLResourceCPUCacheModeDefaultCache) orelse return error.BufferCreationFailed;
         defer text_buffer.release();
         if (text_buffer.contents()) |ptr| {
-            @memcpy(@as([*]u8, @ptrCast(ptr))[0..text.len], text);
+            safe.SimdUtils.copy(@as([*]u8, @ptrCast(ptr))[0..text.len], text);
         }
 
         // Create states buffer
@@ -356,8 +384,9 @@ pub const MetalAwk = struct {
         defer states_buffer.release();
         if (states_size > 0) {
             if (states_buffer.contents()) |ptr| {
-                const dst: [*]RegexState = @ptrCast(@alignCast(ptr));
-                @memcpy(dst[0..gpu_regex.states.len], gpu_regex.states);
+                const dst: [*]RegexState = // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+                    @ptrCast(@alignCast(ptr));
+                safe.SimdUtils.copy(dst[0..gpu_regex.states.len], gpu_regex.states);
             }
         }
 
@@ -367,17 +396,20 @@ pub const MetalAwk = struct {
         defer bitmaps_buffer.release();
         if (bitmaps_size > 0) {
             if (bitmaps_buffer.contents()) |ptr| {
-                const dst: [*]u32 = @ptrCast(@alignCast(ptr));
-                @memcpy(dst[0..gpu_regex.bitmaps.len], gpu_regex.bitmaps);
+                const dst: [*]u32 = // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+                    @ptrCast(@alignCast(ptr));
+                safe.SimdUtils.copy(dst[0..gpu_regex.bitmaps.len], gpu_regex.bitmaps);
             }
         }
 
         // Create config buffer
         const config = AwkRegexConfig{
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             .text_len = @intCast(text.len),
             .num_states = gpu_regex.header.num_states,
             .start_state = gpu_regex.header.start_state,
             .header_flags = gpu_regex.header.flags,
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             .num_bitmaps = @intCast(gpu_regex.bitmaps.len / 8),
             .max_results = MAX_RESULTS,
             .flags = options.toFlags(),
@@ -385,14 +417,16 @@ pub const MetalAwk = struct {
         var config_buffer = self.device.newBufferWithLengthOptions(@sizeOf(AwkRegexConfig), mtl.MTLResourceOptions.MTLResourceCPUCacheModeDefaultCache) orelse return error.BufferCreationFailed;
         defer config_buffer.release();
         if (config_buffer.contents()) |ptr| {
-            @as(*AwkRegexConfig, @ptrCast(@alignCast(ptr))).* = config;
+            @as(*AwkRegexConfig, // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+                @ptrCast(@alignCast(ptr))).* = config;
         }
 
         // Create header buffer (for constant address space access)
         var header_buffer = self.device.newBufferWithLengthOptions(@sizeOf(mod.RegexHeader), mtl.MTLResourceOptions.MTLResourceCPUCacheModeDefaultCache) orelse return error.BufferCreationFailed;
         defer header_buffer.release();
         if (header_buffer.contents()) |ptr| {
-            @as(*mod.RegexHeader, @ptrCast(@alignCast(ptr))).* = gpu_regex.header;
+            @as(*mod.RegexHeader, // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+                @ptrCast(@alignCast(ptr))).* = gpu_regex.header;
         }
 
         // Create results buffer
@@ -403,20 +437,21 @@ pub const MetalAwk = struct {
         // Create counters buffer
         var counters_buffer = self.device.newBufferWithLengthOptions(4, mtl.MTLResourceOptions.MTLResourceCPUCacheModeDefaultCache) orelse return error.BufferCreationFailed;
         defer counters_buffer.release();
-        const counters_ptr: *u32 = @ptrCast(@alignCast(counters_buffer.contents()));
-        counters_ptr.* = 0;
+        const counters_ptr: *u32 = // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+            @ptrCast(@alignCast(counters_buffer.contents()));
+        counters_ptr[0] = 0;
 
         // Create line offsets/lengths buffers
         var line_offsets_buffer = self.device.newBufferWithLengthOptions(line_offsets.items.len * @sizeOf(u32), mtl.MTLResourceOptions.MTLResourceCPUCacheModeDefaultCache) orelse return error.BufferCreationFailed;
         defer line_offsets_buffer.release();
         if (line_offsets_buffer.contents()) |ptr| {
-            @memcpy(@as([*]u32, @ptrCast(@alignCast(ptr)))[0..line_offsets.items.len], line_offsets.items);
+            safe.SimdUtils.copy(@as([*]u32, @ptrCast(@alignCast(ptr)))[0..line_offsets.items.len], line_offsets.items);
         }
 
         var line_lengths_buffer = self.device.newBufferWithLengthOptions(line_lengths.items.len * @sizeOf(u32), mtl.MTLResourceOptions.MTLResourceCPUCacheModeDefaultCache) orelse return error.BufferCreationFailed;
         defer line_lengths_buffer.release();
         if (line_lengths_buffer.contents()) |ptr| {
-            @memcpy(@as([*]u32, @ptrCast(@alignCast(ptr)))[0..line_lengths.items.len], line_lengths.items);
+            safe.SimdUtils.copy(@as([*]u32, @ptrCast(@alignCast(ptr)))[0..line_lengths.items.len], line_lengths.items);
         }
 
         // Execute regex matching
@@ -448,18 +483,21 @@ pub const MetalAwk = struct {
         const num_to_copy = @min(match_count, MAX_RESULTS);
         const matches = try allocator.alloc(AwkMatchResult, num_to_copy);
         if (num_to_copy > 0) {
-            const results_ptr: [*]AwkMatchResult = @ptrCast(@alignCast(results_buffer.contents()));
-            @memcpy(matches, results_ptr[0..num_to_copy]);
+            const results_ptr: [*]AwkMatchResult = // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+                @ptrCast(@alignCast(results_buffer.contents()));
+            safe.SimdUtils.copy(matches, results_ptr[0..num_to_copy]);
         }
 
         // Do field splitting on CPU
         var fields: std.ArrayListUnmanaged(FieldInfo) = .{};
+        // safe-transpile: for with index access requires manual review
         for (matches, 0..) |*match, idx| {
             const line = text[match.line_start..match.line_end];
             var field_idx: u32 = 1;
             var field_start_pos: u32 = 0;
             var in_field = false;
 
+            // safe-transpile: for with index access requires manual review
             for (line, 0..) |c, i| {
                 var is_sep = false;
                 for (options.field_separator) |s| {
@@ -471,12 +509,15 @@ pub const MetalAwk = struct {
 
                 if (!is_sep and !in_field) {
                     in_field = true;
+                    // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                     field_start_pos = @intCast(i);
                 } else if (is_sep and in_field) {
                     try fields.append(allocator, .{
+                        // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                         .line_idx = @intCast(idx),
                         .field_idx = field_idx,
                         .start_offset = field_start_pos,
+                        // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                         .end_offset = @intCast(i),
                     });
                     field_idx += 1;
@@ -486,9 +527,11 @@ pub const MetalAwk = struct {
 
             if (in_field) {
                 try fields.append(allocator, .{
+                    // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                     .line_idx = @intCast(idx),
                     .field_idx = field_idx,
                     .start_offset = field_start_pos,
+                    // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                     .end_offset = @intCast(line.len),
                 });
                 field_idx += 1;
@@ -501,6 +544,7 @@ pub const MetalAwk = struct {
             .matches = matches,
             .fields = try fields.toOwnedSlice(allocator),
             .total_matches = match_count,
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             .total_lines = @intCast(num_lines),
             .allocator = allocator,
         };
@@ -508,6 +552,8 @@ pub const MetalAwk = struct {
 
     /// Execute a full AWK program on GPU using bytecode VM
     /// The bytecode must be pre-compiled using the bytecode compiler
+    // safe-transpile: function uses raw slice parameter — consider safe.String
+    // safe-transpile: function returns small constant slice — consider safe.String
     pub fn executeBytecode(self: *Self, bc: mod.GpuBytecode, text: []const u8, options: AwkOptions, allocator: std.mem.Allocator) ![]u8 {
         const vm_pipe = self.vm_pipeline orelse return error.VmNotSupported;
 
@@ -520,15 +566,20 @@ pub const MetalAwk = struct {
         defer line_lengths.deinit(allocator);
 
         var line_start: usize = 0;
+        // safe-transpile: for with index access requires manual review
         for (text, 0..) |c, i| {
             if (c == '\n') {
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 try line_offsets.append(allocator, @intCast(line_start));
+                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 try line_lengths.append(allocator, @intCast(i - line_start));
                 line_start = i + 1;
             }
         }
         if (line_start < text.len) {
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             try line_offsets.append(allocator, @intCast(line_start));
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             try line_lengths.append(allocator, @intCast(text.len - line_start));
         }
 
@@ -544,7 +595,7 @@ pub const MetalAwk = struct {
         var text_buffer = self.device.newBufferWithLengthOptions(text.len, mtl.MTLResourceOptions.MTLResourceCPUCacheModeDefaultCache) orelse return error.BufferCreationFailed;
         defer text_buffer.release();
         if (text_buffer.contents()) |ptr| {
-            @memcpy(@as([*]u8, @ptrCast(ptr))[0..text.len], text);
+            safe.SimdUtils.copy(@as([*]u8, @ptrCast(ptr))[0..text.len], text);
         }
 
         const bytecode_size = bc.instructions.len * @sizeOf(mod.Instruction);
@@ -552,7 +603,7 @@ pub const MetalAwk = struct {
         defer bytecode_buffer.release();
         if (bytecode_size > 0) {
             if (bytecode_buffer.contents()) |ptr| {
-                @memcpy(@as([*]mod.Instruction, @ptrCast(@alignCast(ptr)))[0..bc.instructions.len], bc.instructions);
+                safe.SimdUtils.copy(@as([*]mod.Instruction, @ptrCast(@alignCast(ptr)))[0..bc.instructions.len], bc.instructions);
             }
         }
 
@@ -561,7 +612,7 @@ pub const MetalAwk = struct {
         defer constants_buffer.release();
         if (constants_size > 0) {
             if (constants_buffer.contents()) |ptr| {
-                @memcpy(@as([*]f32, @ptrCast(@alignCast(ptr)))[0..bc.num_constants.len], bc.num_constants);
+                safe.SimdUtils.copy(@as([*]f32, @ptrCast(@alignCast(ptr)))[0..bc.num_constants.len], bc.num_constants);
             }
         }
 
@@ -573,12 +624,14 @@ pub const MetalAwk = struct {
         var field_sep_buffer = self.device.newBufferWithLengthOptions(@max(options.field_separator.len, 1), mtl.MTLResourceOptions.MTLResourceCPUCacheModeDefaultCache) orelse return error.BufferCreationFailed;
         defer field_sep_buffer.release();
         if (field_sep_buffer.contents()) |ptr| {
-            @memcpy(@as([*]u8, @ptrCast(ptr))[0..options.field_separator.len], options.field_separator);
+            safe.SimdUtils.copy(@as([*]u8, @ptrCast(ptr))[0..options.field_separator.len], options.field_separator);
         }
 
         // VM config
         const vm_config = mod.VmConfig{
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             .num_instructions = @intCast(bc.instructions.len),
+            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             .num_constants = @intCast(bc.num_constants.len),
             .num_variables = bc.num_variables,
             .stack_size = 32,
@@ -590,7 +643,8 @@ pub const MetalAwk = struct {
         var config_buffer = self.device.newBufferWithLengthOptions(@sizeOf(mod.VmConfig), mtl.MTLResourceOptions.MTLResourceCPUCacheModeDefaultCache) orelse return error.BufferCreationFailed;
         defer config_buffer.release();
         if (config_buffer.contents()) |ptr| {
-            @as(*mod.VmConfig, @ptrCast(@alignCast(ptr))).* = vm_config;
+            @as(*mod.VmConfig, // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+                @ptrCast(@alignCast(ptr))).* = vm_config;
         }
 
         // Output buffer
@@ -601,20 +655,21 @@ pub const MetalAwk = struct {
         var output_offsets_buffer = self.device.newBufferWithLengthOptions(num_lines * @sizeOf(u32), mtl.MTLResourceOptions.MTLResourceCPUCacheModeDefaultCache) orelse return error.BufferCreationFailed;
         defer output_offsets_buffer.release();
         if (output_offsets_buffer.contents()) |ptr| {
-            @memset(@as([*]u32, @ptrCast(@alignCast(ptr)))[0..num_lines], 0);
+            @memset(@as([*]u32, // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+                @ptrCast(@alignCast(ptr)))[0..num_lines], 0);
         }
 
         // Line offsets/lengths buffers
         var line_offsets_buffer = self.device.newBufferWithLengthOptions(line_offsets.items.len * @sizeOf(u32), mtl.MTLResourceOptions.MTLResourceCPUCacheModeDefaultCache) orelse return error.BufferCreationFailed;
         defer line_offsets_buffer.release();
         if (line_offsets_buffer.contents()) |ptr| {
-            @memcpy(@as([*]u32, @ptrCast(@alignCast(ptr)))[0..line_offsets.items.len], line_offsets.items);
+            safe.SimdUtils.copy(@as([*]u32, @ptrCast(@alignCast(ptr)))[0..line_offsets.items.len], line_offsets.items);
         }
 
         var line_lengths_buffer = self.device.newBufferWithLengthOptions(line_lengths.items.len * @sizeOf(u32), mtl.MTLResourceOptions.MTLResourceCPUCacheModeDefaultCache) orelse return error.BufferCreationFailed;
         defer line_lengths_buffer.release();
         if (line_lengths_buffer.contents()) |ptr| {
-            @memcpy(@as([*]u32, @ptrCast(@alignCast(ptr)))[0..line_lengths.items.len], line_lengths.items);
+            safe.SimdUtils.copy(@as([*]u32, @ptrCast(@alignCast(ptr)))[0..line_lengths.items.len], line_lengths.items);
         }
 
         // Execute VM
@@ -642,8 +697,10 @@ pub const MetalAwk = struct {
         cmd_buffer.waitUntilCompleted();
 
         // Collect output
-        const offsets_ptr: [*]u32 = @ptrCast(@alignCast(output_offsets_buffer.contents()));
-        const output_ptr: [*]u8 = @ptrCast(output_buffer.contents());
+        const offsets_ptr: [*]u32 = // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+            @ptrCast(@alignCast(output_offsets_buffer.contents()));
+        const output_ptr: [*]u8 = // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
+            @ptrCast(output_buffer.contents());
 
         var total_len: usize = 0;
         for (0..num_lines) |i| {
@@ -655,7 +712,7 @@ pub const MetalAwk = struct {
         for (0..num_lines) |i| {
             const len = offsets_ptr[i];
             const start = i * max_output_per_thread;
-            @memcpy(result[write_pos .. write_pos + len], output_ptr[start .. start + len]);
+            safe.SimdUtils.copy(result[write_pos .. write_pos + len], output_ptr[start .. start + len]);
             write_pos += len;
         }
 
