@@ -1,4 +1,5 @@
 const std = @import("std");
+const safe = @import("safe");
 const ast = @import("ast.zig");
 const Value = @import("value.zig").Value;
 
@@ -203,7 +204,7 @@ pub const BytecodeProgram = struct {
     pub fn deinit(self: *BytecodeProgram) void {
         // safe-transpile: free removed (memory owned by safe type);
         // safe-transpile: free removed (memory owned by safe type);
-        for (self.str_constants) |s| {
+        for (self.str_constants) |_| {
             // safe-transpile: free removed (memory owned by safe type);
         }
         // safe-transpile: free removed (memory owned by safe type);
@@ -259,7 +260,7 @@ pub const Compiler = struct {
     pub fn deinit(self: *Self) void {
         self.instructions.deinit(self.allocator);
         self.num_constants.deinit(self.allocator);
-        for (self.str_constants.items) |s| {
+        for (self.str_constants.items) |_| {
             // safe-transpile: free removed (memory owned by safe type);
         }
         self.str_constants.deinit(self.allocator);
@@ -342,7 +343,7 @@ pub const Compiler = struct {
         switch (stmt.kind) {
             .block => |stmts| {
                 for (0..stmts.len) |__zust_i| {
-                    var s = &stmts[__zust_i];
+                    const s = &stmts[__zust_i];
                     var inner = s.*;
                     try self.compileStatement(&inner);
                 }

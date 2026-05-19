@@ -1,4 +1,5 @@
 const std = @import("std");
+const safe = @import("safe");
 const build_options = @import("build_options");
 
 // Import e_jerk_gpu library for GPU detection and auto-selection
@@ -180,14 +181,14 @@ pub const AwkResult = struct {
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *AwkResult) void {
-        // safe-transpile: free removed (memory owned by safe type);
-        // safe-transpile: free removed (memory owned by safe type);
+        self.allocator.free(self.matches);
+        self.allocator.free(self.fields);
     }
 };
 
 // safe-transpile: function uses raw slice parameter — consider safe.String
 pub fn buildSkipTable(pattern: []const u8, case_insensitive: bool) [256]u8 {
-    var skip_table: [256]u8 = .{};
+    var skip_table: [256]u8 = undefined;
     // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
     const default_skip: u8 = @intCast(@min(pattern.len, 255));
     @memset(&skip_table, default_skip);
@@ -259,7 +260,7 @@ pub const GpuBytecode = struct {
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *GpuBytecode) void {
-        // safe-transpile: free removed (memory owned by safe type);
-        // safe-transpile: free removed (memory owned by safe type);
+        self.allocator.free(self.instructions);
+        self.allocator.free(self.constants);
     }
 };

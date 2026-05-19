@@ -1,4 +1,5 @@
 const std = @import("std");
+const safe = @import("safe");
 const Allocator = std.mem.Allocator;
 const Value = @import("value.zig").Value;
 
@@ -422,7 +423,7 @@ pub const Statement = struct {
         switch (self.kind) {
             .block => |stmts| {
                 for (0..stmts.len) |__zust_i| {
-                    var stmt = &stmts[__zust_i];
+                    const stmt = &stmts[__zust_i];
                     var s = stmt.*;
                     s.deinit(allocator);
                 }

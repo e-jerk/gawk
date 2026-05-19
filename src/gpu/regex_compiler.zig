@@ -1,4 +1,5 @@
 const std = @import("std");
+const safe = @import("safe");
 const mod = @import("mod.zig");
 const regex_lib = @import("regex");
 
@@ -15,8 +16,8 @@ pub const CompiledGpuRegex = struct {
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *CompiledGpuRegex) void {
-        // safe-transpile: free removed (memory owned by safe type);
-        // safe-transpile: free removed (memory owned by safe type);
+        self.allocator.free(self.states);
+        self.allocator.free(self.bitmaps);
     }
 };
 

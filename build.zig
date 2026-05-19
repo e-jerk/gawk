@@ -37,7 +37,8 @@ pub fn build(b: *std.Build) void {
     const e_jerk_regex_module = e_jerk_regex_dep.module("regex");
 
     // safe module for transpiled code
-    const safe_module = b.createModule(.{ .root_source_file = b.path("../zust/src/safe.zig") });
+    const zust_dep = b.dependency("zust", .{});
+    const safe_module = zust_dep.module("safe");
 
     // zig-metal dependency
     const zig_metal_dep = b.dependency("zig_metal", .{});

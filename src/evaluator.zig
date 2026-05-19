@@ -1,4 +1,5 @@
 const std = @import("std");
+const safe = @import("safe");
 const Allocator = std.mem.Allocator;
 const ast = @import("ast.zig");
 const Value = @import("value.zig").Value;
@@ -360,7 +361,7 @@ pub const Evaluator = struct {
         switch (stmt.kind) {
             .block => |stmts| {
                 for (0..stmts.len) |__zust_i| {
-                    var s = &stmts[__zust_i];
+                    const s = &stmts[__zust_i];
                     var inner_stmt = s.*;
                     try self.executeStatement(&inner_stmt);
                     if (self.control != .normal) return;
@@ -967,7 +968,7 @@ pub const Evaluator = struct {
                 const key_str = try key.asString(self.allocator);
                 try self.setArrayElement(as.array, key_str, value);
             },
-            .field_ref => |_| {
+            .field_ref => {
                 // TODO: Setting field values
             },
             else => {},
@@ -1656,7 +1657,7 @@ pub const Evaluator = struct {
             var items = std.ArrayListUnmanaged(ArrayItem){};
             defer {
                 for (0..items.items.len) |__zust_i| {
-                    var item = &items.items[__zust_i];
+                    const item = &items.items[__zust_i];
                     self.allocator.free(item.key);
                 }
                 items.deinit(self.allocator);

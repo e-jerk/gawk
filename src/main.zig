@@ -1,4 +1,5 @@
 const std = @import("std");
+const safe = @import("safe");
 const build_options = @import("build_options");
 const gpu = @import("gpu");
 const cpu = @import("cpu");
@@ -14,7 +15,7 @@ const AwkOptions = gpu.AwkOptions;
 const isRegexPattern = regex.isRegexPattern;
 
 pub fn main() !u8 {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -42,7 +43,7 @@ pub fn main() !u8 {
     var variables: std.StringHashMapUnmanaged([]const u8) = .{};
     defer {
         var var_it = variables.iterator();
-        while (var_it.next()) |entry| {
+        while (var_it.next()) |_| {
             // safe-transpile: free removed (memory owned by safe type);
         }
         variables.deinit(allocator);
@@ -228,7 +229,6 @@ pub fn main() !u8 {
 
     // Read input
     var text: safe.Slice(u8) = .{};
-    var text_allocator: std.mem.Allocator = allocator;
 
     if (files.items.len > 0) {
         // Read from files

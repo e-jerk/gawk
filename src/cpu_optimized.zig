@@ -1,4 +1,5 @@
 const std = @import("std");
+const safe = @import("safe");
 const gpu = @import("gpu");
 const regex_lib = @import("regex");
 
@@ -33,13 +34,13 @@ pub fn processAwk(
     options: AwkOptions,
     allocator: std.mem.Allocator,
 ) !AwkResult {
-    var matches: std.ArrayListUnmanaged(AwkMatchResult) = .{};
+    var matches: std.ArrayListUnmanaged(AwkMatchResult) = std.ArrayListUnmanaged(AwkMatchResult).empty;
     errdefer matches.deinit(allocator);
-    var fields: std.ArrayListUnmanaged(FieldInfo) = .{};
+    var fields: std.ArrayListUnmanaged(FieldInfo) = std.ArrayListUnmanaged(FieldInfo).empty;
     errdefer fields.deinit(allocator);
 
     // Pre-compute lowercase pattern if case insensitive
-    var lower_pattern_buf: [1024]u8 = .{};
+    var lower_pattern_buf: [1024]u8 = undefined;
     const search_pattern = if (options.case_insensitive and pattern.len > 0 and pattern.len <= 1024) blk: {
         toLowerSlice(pattern, lower_pattern_buf[0..pattern.len]);
         break :blk lower_pattern_buf[0..pattern.len];
@@ -221,7 +222,7 @@ fn searchLineSIMD(line: []const u8, pattern: []const u8, skip_table: *const [256
 
     while (pos + pattern.len <= line.len) {
         if (matchAtPositionSIMD(line, pos, pattern, case_insensitive)) {
-            match_pos[0] = pos;
+            match_pos.* = pos;
             return true;
         }
 
@@ -524,7 +525,7 @@ pub fn applySubstitutionsRegex(
 ) ![]u8 {
     if (substitutions.len == 0) {
         const result = try allocator.alloc(u8, text.len);
-        safe.SimdUtils.copy(result, text);
+        @memcpy(result, text);
         return result;
     }
 
@@ -547,13 +548,13 @@ pub fn applySubstitutionsRegex(
         // Copy text before match
         const before_len = match_pos - src_pos;
         if (before_len > 0) {
-            safe.SimdUtils.copy(result[dst_pos..][0..before_len], text[src_pos..][0..before_len]);
+            @memcpy(result[dst_pos..][0..before_len], text[src_pos..][0..before_len]);
             dst_pos += before_len;
         }
 
         // Copy replacement
         if (replacement.len > 0) {
-            safe.SimdUtils.copy(result[dst_pos..][0..replacement.len], replacement);
+            @memcpy(result[dst_pos..][0..replacement.len], replacement);
             dst_pos += replacement.len;
         }
 
@@ -563,7 +564,7 @@ pub fn applySubstitutionsRegex(
     // Copy remaining text
     const remaining = text.len - src_pos;
     if (remaining > 0) {
-        safe.SimdUtils.copy(result[dst_pos..][0..remaining], text[src_pos..][0..remaining]);
+        @memcpy(result[dst_pos..][0..remaining], text[src_pos..][0..remaining]);
     }
 
     return result;
@@ -581,7 +582,7 @@ pub fn applySubstitutions(
 ) ![]u8 {
     if (substitutions.len == 0) {
         const result = try allocator.alloc(u8, text.len);
-        safe.SimdUtils.copy(result, text);
+        @memcpy(result, text);
         return result;
     }
 
@@ -605,13 +606,13 @@ pub fn applySubstitutions(
         // Copy text before match (SIMD-friendly memcpy)
         const before_len = match_pos - src_pos;
         if (before_len > 0) {
-            safe.SimdUtils.copy(result[dst_pos..][0..before_len], text[src_pos..][0..before_len]);
+            @memcpy(result[dst_pos..][0..before_len], text[src_pos..][0..before_len]);
             dst_pos += before_len;
         }
 
         // Copy replacement
         if (replacement.len > 0) {
-            safe.SimdUtils.copy(result[dst_pos..][0..replacement.len], replacement);
+            @memcpy(result[dst_pos..][0..replacement.len], replacement);
             dst_pos += replacement.len;
         }
 
@@ -621,7 +622,7 @@ pub fn applySubstitutions(
     // Copy remaining text
     const remaining = text.len - src_pos;
     if (remaining > 0) {
-        safe.SimdUtils.copy(result[dst_pos..][0..remaining], text[src_pos..][0..remaining]);
+        @memcpy(result[dst_pos..][0..remaining], text[src_pos..][0..remaining]);
     }
 
     return result;

@@ -1,4 +1,5 @@
 const std = @import("std");
+const safe = @import("safe");
 const Allocator = std.mem.Allocator;
 
 // ============================================================================
@@ -302,8 +303,8 @@ pub const Value = struct {
         const bs = try b.asString(allocator);
 
         const result = try allocator.alloc(u8, as.len + bs.len);
-        safe.SimdUtils.copy(result[0..as.len], as);
-        safe.SimdUtils.copy(result[as.len..], bs);
+        @memcpy(result[0..as.len], as);
+        @memcpy(result[as.len..], bs);
 
         return initStringOwned(result, allocator);
     }

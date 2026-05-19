@@ -7,8 +7,8 @@
     .dependencies = .{
         // Shared regex library
         .e_jerk_regex = .{
-            .url = "git+https://github.com/e-jerk/regex#bf3f7db91ab18d0782acf46fa39f170abb2670ad",
-            .hash = "e_jerk_regex-0.1.0-ex0qsUv2AADQ6ViebDG4UIHjxP9EAH7Ybws-O_VN62BB",
+            .url = "git+https://github.com/e-jerk/regex#main",
+            .hash = "e_jerk_regex-0.1.0-ex0qsQI6AQAD142xe8jsMztFliF2teM8m5NJDPPxLrr6",
         },
         // Shared shader library
         .shaders_common = .{
@@ -34,6 +34,10 @@
         .vulkan_headers = .{
             .url = "git+https://github.com/KhronosGroup/Vulkan-Headers#0777a3ad88bad5f4b11cfd509458bbc0ddadc773",
             .hash = "N-V-__8AAMZuLQIcPe--JSv0kn_Ga8tsjgbkaojW0OHW2Rfd",
+        },
+        .zust = .{
+            .url = "git+https://github.com/e-jerk/zust#main",
+            .hash = "zust-0.1.0-795McUiwCAB_Bc2vxBgN-Mq0M1WCIeGUFhII0S0Uv1_o",
         },
     },
 

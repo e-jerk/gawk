@@ -1,4 +1,5 @@
 const std = @import("std");
+const safe = @import("safe");
 const gpu = @import("gpu");
 const cpu_optimized = @import("cpu_optimized");
 
