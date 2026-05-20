@@ -1,5 +1,5 @@
 # Stage 1: Builder
-FROM alpine:3.19 AS builder
+FROM alpine:3.21 AS builder
 
 # Install build dependencies including Vulkan
 RUN apk add --no-cache \
@@ -43,7 +43,7 @@ ARG BINARY_NAME=gawk
 COPY --from=builder /${BINARY_NAME} /${BINARY_NAME}
 
 # Stage 3: Runtime (pure variant)
-FROM alpine:3.19 AS runtime
+FROM alpine:3.21 AS runtime
 
 ARG TARGETARCH
 ARG BINARY_NAME=gawk
