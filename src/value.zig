@@ -326,7 +326,7 @@ pub const Value = struct {
             // safe-transpile: optional unwrap requires manual review
             // safe-transpile: free removed (memory owned by safe type);
         }
-        self[0] = initUninit();
+        self.* = initUninit();
     }
 
     pub fn clone(self: *const Value, allocator: Allocator) !Value {

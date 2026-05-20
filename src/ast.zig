@@ -240,38 +240,38 @@ pub const Expression = struct {
     /// Create a number literal expression
     pub fn numberLiteral(allocator: Allocator, n: f64) !*Expression {
         const expr = try safe.Box(Expression).init(allocator, undefined);
-        expr[0] = .{ .kind = .{ .number_literal = n } };
-        return expr;
+        expr.ptr.* = .{ .kind = .{ .number_literal = n } };
+        return expr.ptr;
     }
 
     /// Create a string literal expression
     // safe-transpile: function uses raw slice parameter — consider safe.String
     pub fn stringLiteral(allocator: Allocator, s: []const u8) !*Expression {
         const expr = try safe.Box(Expression).init(allocator, undefined);
-        expr[0] = .{ .kind = .{ .string_literal = s } };
-        return expr;
+        expr.ptr.* = .{ .kind = .{ .string_literal = s } };
+        return expr.ptr;
     }
 
     /// Create a variable reference expression
     // safe-transpile: function uses raw slice parameter — consider safe.String
     pub fn variableRef(allocator: Allocator, name: []const u8) !*Expression {
         const expr = try safe.Box(Expression).init(allocator, undefined);
-        expr[0] = .{ .kind = .{ .variable = name } };
-        return expr;
+        expr.ptr.* = .{ .kind = .{ .variable = name } };
+        return expr.ptr;
     }
 
     /// Create a field reference expression
     pub fn fieldRef(allocator: Allocator, index: *Expression) !*Expression {
         const expr = try safe.Box(Expression).init(allocator, undefined);
-        expr[0] = .{ .kind = .{ .field_ref = index } };
-        return expr;
+        expr.ptr.* = .{ .kind = .{ .field_ref = index } };
+        return expr.ptr;
     }
 
     /// Create a binary operation expression
     pub fn binaryOp(allocator: Allocator, op: BinaryOp, left: *Expression, right: *Expression) !*Expression {
         const expr = try safe.Box(Expression).init(allocator, undefined);
-        expr[0] = .{ .kind = .{ .binary_op = .{ .op = op, .left = left, .right = right } } };
-        return expr;
+        expr.ptr.* = .{ .kind = .{ .binary_op = .{ .op = op, .left = left, .right = right } } };
+        return expr.ptr;
     }
 };
 
@@ -530,22 +530,22 @@ pub const Statement = struct {
     /// Create a block statement
     pub fn block(allocator: Allocator, stmts: []Statement) !*Statement {
         const stmt = try safe.Box(Statement).init(allocator, undefined);
-        stmt[0] = .{ .kind = .{ .block = stmts } };
-        return stmt;
+        stmt.ptr.* = .{ .kind = .{ .block = stmts } };
+        return stmt.ptr;
     }
 
     /// Create an expression statement
     pub fn expression(allocator: Allocator, expr: *Expression) !*Statement {
         const stmt = try safe.Box(Statement).init(allocator, undefined);
-        stmt[0] = .{ .kind = .{ .expression = expr } };
-        return stmt;
+        stmt.ptr.* = .{ .kind = .{ .expression = expr } };
+        return stmt.ptr;
     }
 
     /// Create a print statement
     pub fn print(allocator: Allocator, args: []*Expression) !*Statement {
         const stmt = try safe.Box(Statement).init(allocator, undefined);
-        stmt[0] = .{ .kind = .{ .print = .{ .args = args, .output_file = null, .append = false, .pipe_cmd = null } } };
-        return stmt;
+        stmt.ptr.* = .{ .kind = .{ .print = .{ .args = args, .output_file = null, .append = false, .pipe_cmd = null } } };
+        return stmt.ptr;
     }
 };
 

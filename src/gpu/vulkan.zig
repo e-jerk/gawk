@@ -337,17 +337,13 @@ pub const VulkanAwk = struct {
         // safe-transpile: for with index access requires manual review
         for (text, 0..) |c, i| {
             if (c == '\n') {
-                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 try line_offsets.append(allocator, @intCast(line_start));
-                // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                 try line_lengths.append(allocator, @intCast(i - line_start));
                 line_start = i + 1;
             }
         }
         if (line_start < text.len) {
-            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             try line_offsets.append(allocator, @intCast(line_start));
-            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             try line_lengths.append(allocator, @intCast(text.len - line_start));
         }
 
@@ -390,9 +386,7 @@ pub const VulkanAwk = struct {
             @ptrCast(@alignCast(config_buffer.mapped))).* = AwkConfig{
             // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             .text_len = @intCast(text.len),
-            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
-            .pattern_len = @intCast(pattern.len),
-            // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
+            .pattern_len = @intCast(pattern_len),
             .field_sep_len = @intCast(options.field_separator.len),
             // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
             .num_fields_requested = @intCast(options.requested_fields.len),
@@ -575,9 +569,9 @@ pub const VulkanAwk = struct {
         defer gpu_regex.deinit();
 
         // Find line boundaries on CPU
-        var line_offsets: std.ArrayListUnmanaged(u32) = .{};
+        var line_offsets: std.ArrayListUnmanaged(u32) = .empty;
         defer line_offsets.deinit(allocator);
-        var line_lengths: std.ArrayListUnmanaged(u32) = .{};
+        var line_lengths: std.ArrayListUnmanaged(u32) = .empty;
         defer line_lengths.deinit(allocator);
 
         var line_start: usize = 0;

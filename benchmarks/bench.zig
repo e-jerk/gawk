@@ -6,13 +6,17 @@ const cpu_gnu = @import("cpu_gnu");
 
 const AwkOptions = gpu.AwkOptions;
 
-pub fn main() !void {
-    var gpa = std.heap.DebugAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    var args_iter = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
+    defer args_iter.deinit();
+    var args: std.ArrayList([]const u8) = .empty;
+    defer args.deinit(allocator);
+    while (args_iter.next()) |arg| {
+        try args.append(allocator, arg);
+    }
+    const args_slice = args.items;
 
     // Default parameters
     var file_size: usize = 10 * 1024 * 1024; // 10MB
@@ -22,17 +26,17 @@ pub fn main() !void {
 
     // Parse arguments
     var i: usize = 1;
-    while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--size") and i + 1 < args.len) {
+    while (i < args_slice.len) : (i += 1) {
+        if (std.mem.eql(u8, args_slice[i], "--size") and i + 1 < args_slice.len) {
             i += 1;
-            file_size = try std.fmt.parseInt(usize, args[i], 10);
-        } else if (std.mem.eql(u8, args[i], "--pattern") and i + 1 < args.len) {
+            file_size = try std.fmt.parseInt(usize, args_slice[i], 10);
+        } else if (std.mem.eql(u8, args_slice[i], "--pattern") and i + 1 < args_slice.len) {
             i += 1;
-            pattern = args[i];
-        } else if (std.mem.eql(u8, args[i], "--iterations") and i + 1 < args.len) {
+            pattern = args_slice[i];
+        } else if (std.mem.eql(u8, args_slice[i], "--iterations") and i + 1 < args_slice.len) {
             i += 1;
-            iterations = try std.fmt.parseInt(usize, args[i], 10);
-        } else if (std.mem.eql(u8, args[i], "--regex")) {
+            iterations = try std.fmt.parseInt(usize, args_slice[i], 10);
+        } else if (std.mem.eql(u8, args_slice[i], "--regex")) {
             run_regex = true;
         }
     }
@@ -59,12 +63,12 @@ pub fn main() !void {
 
     // CPU (Optimized) benchmark
     std.debug.print("Benchmarking CPU (Optimized)...\n", .{});
-    const cpu_times = try benchmarkCpu(text, pattern, options, allocator, iterations);
+    const cpu_times = try benchmarkCpu(text, pattern, options, allocator, iterations, init.io);
     defer allocator.free(cpu_times);
 
     // CPU (GNU) benchmark
     std.debug.print("Benchmarking CPU (GNU)...\n", .{});
-    const cpu_gnu_times = try benchmarkCpuGnu(text, pattern, options, allocator, iterations);
+    const cpu_gnu_times = try benchmarkCpuGnu(text, pattern, options, allocator, iterations, init.io);
     defer if (cpu_gnu_times) |t| allocator.free(t);
 
     // Metal benchmark
@@ -72,7 +76,7 @@ pub fn main() !void {
     var metal_matches: u64 = 0;
     if (build_options.is_macos) {
         std.debug.print("Benchmarking Metal...\n", .{});
-        const metal_result = benchmarkMetal(text, pattern, options, allocator, iterations) catch |err| blk: {
+        const metal_result = benchmarkMetal(text, pattern, options, allocator, iterations, init.io) catch |err| blk: {
             std.debug.print("Metal benchmark failed: {}\n", .{err});
             break :blk null;
         };
@@ -87,7 +91,7 @@ pub fn main() !void {
     std.debug.print("Benchmarking Vulkan...\n", .{});
     var vulkan_times: ?[]u64 = null;
     var vulkan_matches: u64 = 0;
-    const vulkan_result = benchmarkVulkan(text, pattern, options, allocator, iterations) catch |err| blk: {
+    const vulkan_result = benchmarkVulkan(text, pattern, options, allocator, iterations, init.io) catch |err| blk: {
         std.debug.print("Vulkan benchmark failed: {}\n", .{err});
         break :blk null;
     };
@@ -156,7 +160,7 @@ pub fn main() !void {
 
     // Run regex benchmarks if requested
     if (run_regex) {
-        try runRegexBenchmarks(allocator, file_size, iterations);
+        try runRegexBenchmarks(allocator, file_size, iterations, init.io);
     }
 }
 
@@ -195,30 +199,30 @@ fn generateTestData(allocator: std.mem.Allocator, size: usize) ![]u8 {
     return data;
 }
 
-fn benchmarkCpu(text: []const u8, pattern: []const u8, options: AwkOptions, allocator: std.mem.Allocator, iterations: usize) ![]u64 {
+fn benchmarkCpu(text: []const u8, pattern: []const u8, options: AwkOptions, allocator: std.mem.Allocator, iterations: usize, io: std.Io) ![]u64 {
     var times = try allocator.alloc(u64, iterations);
 
     for (0..iterations) |i| {
-        var timer = try std.time.Timer.start();
+        var start = std.Io.Clock.awake.now(io);
         var result = try cpu.processAwk(text, pattern, options, allocator);
-        times[i] = timer.read() / std.time.ns_per_ms;
+        times[i] = @intCast(start.untilNow(io, .awake).toMilliseconds());
         result.deinit();
     }
 
     return times;
 }
 
-fn benchmarkCpuGnu(text: []const u8, pattern: []const u8, options: AwkOptions, allocator: std.mem.Allocator, iterations: usize) !?[]u64 {
+fn benchmarkCpuGnu(text: []const u8, pattern: []const u8, options: AwkOptions, allocator: std.mem.Allocator, iterations: usize, io: std.Io) !?[]u64 {
     var times = try allocator.alloc(u64, iterations);
 
     for (0..iterations) |i| {
-        var timer = try std.time.Timer.start();
+        var start = std.Io.Clock.awake.now(io);
         var result = cpu_gnu.processAwk(text, pattern, options, allocator) catch |err| {
             std.debug.print("GNU processAwk failed: {}\n", .{err});
             allocator.free(times);
             return null;
         };
-        times[i] = timer.read() / std.time.ns_per_ms;
+        times[i] = @intCast(start.untilNow(io, .awake).toMilliseconds());
         result.deinit();
     }
 
@@ -230,7 +234,7 @@ const BenchmarkResult = struct {
     matches: u64,
 };
 
-fn benchmarkMetal(text: []const u8, pattern: []const u8, options: AwkOptions, allocator: std.mem.Allocator, iterations: usize) !?BenchmarkResult {
+fn benchmarkMetal(text: []const u8, pattern: []const u8, options: AwkOptions, allocator: std.mem.Allocator, iterations: usize, io: std.Io) !?BenchmarkResult {
     if (!build_options.is_macos) return null;
 
     var searcher = gpu.metal.MetalAwk.init(allocator) catch return null;
@@ -240,12 +244,12 @@ fn benchmarkMetal(text: []const u8, pattern: []const u8, options: AwkOptions, al
     var last_matches: u64 = 0;
 
     for (0..iterations) |i| {
-        var timer = try std.time.Timer.start();
+        var start = std.Io.Clock.awake.now(io);
         var result = searcher.processAwk(text, pattern, options, allocator) catch {
             allocator.free(times);
             return null;
         };
-        times[i] = timer.read() / std.time.ns_per_ms;
+        times[i] = @intCast(start.untilNow(io, .awake).toMilliseconds());
         last_matches = result.matches.len;
         result.deinit();
     }
@@ -253,7 +257,7 @@ fn benchmarkMetal(text: []const u8, pattern: []const u8, options: AwkOptions, al
     return BenchmarkResult{ .times = times, .matches = last_matches };
 }
 
-fn benchmarkVulkan(text: []const u8, pattern: []const u8, options: AwkOptions, allocator: std.mem.Allocator, iterations: usize) !?BenchmarkResult {
+fn benchmarkVulkan(text: []const u8, pattern: []const u8, options: AwkOptions, allocator: std.mem.Allocator, iterations: usize, io: std.Io) !?BenchmarkResult {
     var searcher = gpu.vulkan.VulkanAwk.init(allocator) catch return null;
     defer searcher.deinit();
 
@@ -261,12 +265,12 @@ fn benchmarkVulkan(text: []const u8, pattern: []const u8, options: AwkOptions, a
     var last_matches: u64 = 0;
 
     for (0..iterations) |i| {
-        var timer = try std.time.Timer.start();
+        var start = std.Io.Clock.awake.now(io);
         var result = searcher.processAwk(text, pattern, options, allocator) catch {
             allocator.free(times);
             return null;
         };
-        times[i] = timer.read() / std.time.ns_per_ms;
+        times[i] = @intCast(start.untilNow(io, .awake).toMilliseconds());
         last_matches = result.matches.len;
         result.deinit();
     }
@@ -290,20 +294,20 @@ fn minimum(times: []u64) f64 {
 
 // ========== REGEX BENCHMARKS ==========
 
-fn benchmarkCpuRegex(text: []const u8, pattern: []const u8, options: AwkOptions, allocator: std.mem.Allocator, iterations: usize) ![]u64 {
+fn benchmarkCpuRegex(text: []const u8, pattern: []const u8, options: AwkOptions, allocator: std.mem.Allocator, iterations: usize, io: std.Io) ![]u64 {
     var times = try allocator.alloc(u64, iterations);
 
     for (0..iterations) |i| {
-        var timer = try std.time.Timer.start();
+        var start = std.Io.Clock.awake.now(io);
         var result = try cpu.processAwkRegex(text, pattern, options, allocator);
-        times[i] = timer.read() / std.time.ns_per_ms;
+        times[i] = @intCast(start.untilNow(io, .awake).toMilliseconds());
         result.deinit();
     }
 
     return times;
 }
 
-fn benchmarkMetalRegex(text: []const u8, pattern: []const u8, options: AwkOptions, allocator: std.mem.Allocator, iterations: usize) !?BenchmarkResult {
+fn benchmarkMetalRegex(text: []const u8, pattern: []const u8, options: AwkOptions, allocator: std.mem.Allocator, iterations: usize, io: std.Io) !?BenchmarkResult {
     if (!build_options.is_macos) return null;
 
     var searcher = gpu.metal.MetalAwk.init(allocator) catch return null;
@@ -313,12 +317,12 @@ fn benchmarkMetalRegex(text: []const u8, pattern: []const u8, options: AwkOption
     var last_matches: u64 = 0;
 
     for (0..iterations) |i| {
-        var timer = try std.time.Timer.start();
+        var start = std.Io.Clock.awake.now(io);
         var result = searcher.processAwkRegex(text, pattern, options, allocator) catch {
             allocator.free(times);
             return null;
         };
-        times[i] = timer.read() / std.time.ns_per_ms;
+        times[i] = @intCast(start.untilNow(io, .awake).toMilliseconds());
         last_matches = result.matches.len;
         result.deinit();
     }
@@ -326,7 +330,7 @@ fn benchmarkMetalRegex(text: []const u8, pattern: []const u8, options: AwkOption
     return BenchmarkResult{ .times = times, .matches = last_matches };
 }
 
-fn benchmarkVulkanRegex(text: []const u8, pattern: []const u8, options: AwkOptions, allocator: std.mem.Allocator, iterations: usize) !?BenchmarkResult {
+fn benchmarkVulkanRegex(text: []const u8, pattern: []const u8, options: AwkOptions, allocator: std.mem.Allocator, iterations: usize, io: std.Io) !?BenchmarkResult {
     var searcher = gpu.vulkan.VulkanAwk.init(allocator) catch return null;
     defer searcher.deinit();
 
@@ -334,12 +338,12 @@ fn benchmarkVulkanRegex(text: []const u8, pattern: []const u8, options: AwkOptio
     var last_matches: u64 = 0;
 
     for (0..iterations) |i| {
-        var timer = try std.time.Timer.start();
+        var start = std.Io.Clock.awake.now(io);
         var result = searcher.processAwkRegex(text, pattern, options, allocator) catch {
             allocator.free(times);
             return null;
         };
-        times[i] = timer.read() / std.time.ns_per_ms;
+        times[i] = @intCast(start.untilNow(io, .awake).toMilliseconds());
         last_matches = result.matches.len;
         result.deinit();
     }
@@ -347,7 +351,7 @@ fn benchmarkVulkanRegex(text: []const u8, pattern: []const u8, options: AwkOptio
     return BenchmarkResult{ .times = times, .matches = last_matches };
 }
 
-pub fn runRegexBenchmarks(allocator: std.mem.Allocator, file_size: usize, iterations: usize) !void {
+pub fn runRegexBenchmarks(allocator: std.mem.Allocator, file_size: usize, iterations: usize, io: std.Io) !void {
     std.debug.print("\n====== REGEX BENCHMARK ======\n\n", .{});
 
     // Generate test data with numbers and mixed content
@@ -381,7 +385,7 @@ pub fn runRegexBenchmarks(allocator: std.mem.Allocator, file_size: usize, iterat
         const expected_matches = cpu_warmup.matches.len;
         cpu_warmup.deinit();
 
-        const cpu_times = try benchmarkCpuRegex(text, pattern, options, allocator, iterations);
+        const cpu_times = try benchmarkCpuRegex(text, pattern, options, allocator, iterations, io);
         defer allocator.free(cpu_times);
 
         const cpu_avg = average(cpu_times);
@@ -390,7 +394,7 @@ pub fn runRegexBenchmarks(allocator: std.mem.Allocator, file_size: usize, iterat
 
         // Metal Regex (macOS only)
         if (build_options.is_macos) {
-            const metal_result = benchmarkMetalRegex(text, pattern, options, allocator, iterations) catch null;
+            const metal_result = benchmarkMetalRegex(text, pattern, options, allocator, iterations, io) catch null;
             if (metal_result) |result| {
                 defer allocator.free(result.times);
                 const metal_avg = average(result.times);
@@ -403,7 +407,7 @@ pub fn runRegexBenchmarks(allocator: std.mem.Allocator, file_size: usize, iterat
         }
 
         // Vulkan Regex
-        const vulkan_result = benchmarkVulkanRegex(text, pattern, options, allocator, iterations) catch null;
+        const vulkan_result = benchmarkVulkanRegex(text, pattern, options, allocator, iterations, io) catch null;
         if (vulkan_result) |result| {
             defer allocator.free(result.times);
             const vulkan_avg = average(result.times);

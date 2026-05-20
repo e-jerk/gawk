@@ -246,14 +246,14 @@ pub const Compiler = struct {
     pub fn init(allocator: std.mem.Allocator) Self {
         return .{
             .allocator = allocator,
-            .instructions = .{},
-            .num_constants = .{},
-            .str_constants = .{},
+            .instructions = .empty,
+            .num_constants = .empty,
+            .str_constants = .empty,
             .variables = .{},
             .next_var_idx = 0,
             .loop_depth = 0,
-            .loop_breaks = .{},
-            .loop_continues = .{},
+            .loop_breaks = .empty,
+            .loop_continues = .empty,
         };
     }
 

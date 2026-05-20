@@ -53,13 +53,13 @@ pub const Evaluator = struct {
     current_line: []const u8 = "",
 
     /// Current fields (computed lazily from current_line)
-    fields: std.ArrayListUnmanaged([]const u8) = .{},
+    fields: std.ArrayListUnmanaged([]const u8) = .empty,
 
     /// Open files for getline redirection
-    open_files: std.StringHashMapUnmanaged(std.fs.File) = .{},
+    open_files: std.StringHashMapUnmanaged(std.Io.File) = .{},
 
     /// Open output files for print/printf redirection
-    open_output_files: std.StringHashMapUnmanaged(std.fs.File) = .{},
+    open_output_files: std.StringHashMapUnmanaged(std.Io.File) = .{},
 
     /// Field separator
     field_separator: []const u8 = " \t",
@@ -95,10 +95,13 @@ pub const Evaluator = struct {
     rlength: i64 = -1,
 
     /// Output buffer
-    output: std.ArrayListUnmanaged(u8) = .{},
+    output: std.ArrayListUnmanaged(u8) = .empty,
 
     /// Control flow state
     control: ControlFlow = .normal,
+
+    /// I/O interface for file operations and clock
+    io: std.Io = undefined,
 
     /// Return value from function
     return_value: Value = Value.initEmpty(),
@@ -112,19 +115,18 @@ pub const Evaluator = struct {
     /// Maximum iterations per loop (protection against infinite loops)
     max_iterations: u32 = 10_000_000,
 
-    pub fn init(allocator: Allocator, functions: *std.StringHashMapUnmanaged(ast.Function)) Evaluator {
+    pub fn init(allocator: Allocator, functions: *std.StringHashMapUnmanaged(ast.Function), io: std.Io, environ_map: *std.process.Environ.Map) Evaluator {
         var ev = Evaluator{
             .allocator = allocator,
             .variables = .{},
             .arrays = .{},
             .functions = functions,
-            .output = .{},
+            .output = .empty,
+            .io = io,
         };
         // Initialize ENVIRON array with environment variables
-        var env_map = std.process.getEnvMap(allocator) catch return ev;
-        defer env_map.deinit();
-        var env_array = std.StringHashMapUnmanaged(Value){};
-        var it = env_map.iterator();
+        var env_array = std.StringHashMapUnmanaged(Value).empty;
+        var it = environ_map.iterator();
         while (it.next()) |entry| {
             const key = allocator.dupe(u8, entry.key_ptr.*) catch continue;
             const val_str = allocator.dupe(u8, entry.value_ptr.*) catch continue;
@@ -159,13 +161,13 @@ pub const Evaluator = struct {
 
         var file_it = self.open_files.iterator();
         while (file_it.next()) |entry| {
-            entry.value_ptr.close();
+            entry.value_ptr.close(self.io);
         }
         self.open_files.deinit(self.allocator);
 
         var out_file_it = self.open_output_files.iterator();
         while (out_file_it.next()) |entry| {
-            entry.value_ptr.close();
+            entry.value_ptr.close(self.io);
         }
         self.open_output_files.deinit(self.allocator);
 
@@ -212,7 +214,7 @@ pub const Evaluator = struct {
         }
 
         // Process each input record based on RS
-        var records: std.ArrayListUnmanaged([]const u8) = .{};
+        var records: std.ArrayListUnmanaged([]const u8) = .empty;
         defer records.deinit(self.allocator);
         if (self.rs.len == 0) {
             // Paragraph mode: split on one or more blank lines
@@ -560,7 +562,7 @@ pub const Evaluator = struct {
     fn executeGetline(self: *Evaluator, var_name: ?[]const u8, file_expr: ?*ast.Expression, pipe_expr: ?*ast.Expression) !Value {
         _ = pipe_expr; // TODO: Support pipe getline
 
-        var line_buf: [4096]u8 = .{};
+        var line_buf: [4096]u8 = undefined;
         var line: ?[]const u8 = null;
 
         if (file_expr) |fe| {
@@ -569,7 +571,7 @@ pub const Evaluator = struct {
 
             // Check if file is already open
             if (self.open_files.get(file_str)) |*file| {
-                const bytes_read = file.read(&line_buf) catch return Value.initNumber(-1.0);
+                const bytes_read = file.readStreaming(self.io, &.{&line_buf}) catch return Value.initNumber(-1.0);
                 if (bytes_read == 0) return Value.initNumber(0.0);
                 // Find newline
                 if (std.mem.indexOfScalar(u8, line_buf[0..bytes_read], '\n')) |nl| {
@@ -577,23 +579,25 @@ pub const Evaluator = struct {
                     // Seek back if we read past newline
                     const past_newline = bytes_read - nl - 1;
                     if (past_newline > 0) {
+                        // TODO: seek back using File.Reader
                         // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
-                        file.seekBy(-@as(i64, @intCast(past_newline))) catch {};
+                        // file.seekBy(self.io, -@as(i64, @intCast(past_newline))) catch {};
                     }
                 } else {
                     line = line_buf[0..bytes_read];
                 }
             } else {
-                const new_file = std.fs.cwd().openFile(file_str, .{}) catch return Value.initNumber(-1.0);
+                const new_file = std.Io.Dir.cwd().openFile(self.io, file_str, .{}) catch return Value.initNumber(-1.0);
                 try self.open_files.put(self.allocator, try self.allocator.dupe(u8, file_str), new_file);
-                const bytes_read = new_file.read(&line_buf) catch return Value.initNumber(-1.0);
+                const bytes_read = new_file.readStreaming(self.io, &.{&line_buf}) catch return Value.initNumber(-1.0);
                 if (bytes_read == 0) return Value.initNumber(0.0);
                 if (std.mem.indexOfScalar(u8, line_buf[0..bytes_read], '\n')) |nl| {
                     line = line_buf[0..nl];
                     const past_newline = bytes_read - nl - 1;
                     if (past_newline > 0) {
+                        // TODO: seek back using File.Reader
                         // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
-                        new_file.seekBy(-@as(i64, @intCast(past_newline))) catch {};
+                        // new_file.seekBy(self.io, -@as(i64, @intCast(past_newline))) catch {};
                     }
                 } else {
                     line = line_buf[0..bytes_read];
@@ -625,18 +629,18 @@ pub const Evaluator = struct {
             const cmd_str = try cmd_val.asString(self.allocator);
 
             // Simple pipe: spawn command, write data to stdin, wait
-            var child = std.process.Child.init(&.{ "/bin/sh", "-c", cmd_str }, self.allocator);
-            child.stdin_behavior = .Pipe;
-            child.stdout_behavior = .Inherit;
-            child.stderr_behavior = .Inherit;
-
-            child.spawn() catch return error.IoError;
+            var child = std.process.spawn(self.io, .{
+                .argv = &.{ "/bin/sh", "-c", cmd_str },
+                .stdin = .pipe,
+                .stdout = .inherit,
+                .stderr = .inherit,
+            }) catch return error.IoError;
             if (child.stdin) |*stdin| {
-                _ = stdin.write(data) catch {};
-                stdin.close();
+                stdin.writeStreamingAll(self.io, data) catch {};
+                stdin.close(self.io);
                 child.stdin = null;
             }
-            _ = child.wait() catch {};
+            _ = child.wait(self.io) catch {};
             return;
         }
 
@@ -646,24 +650,24 @@ pub const Evaluator = struct {
 
             // Check if file is already open
             if (self.open_output_files.get(file_str)) |*file| {
-                _ = file.write(data) catch {};
+                file.writeStreamingAll(self.io, data) catch {};
             } else {
                 const new_file = blk: {
                     if (append) {
-                        var file = std.fs.cwd().openFile(file_str, .{ .mode = .read_write }) catch {
-                            const created = std.fs.cwd().createFile(file_str, .{ .truncate = false }) catch return;
+                        const file = std.Io.Dir.cwd().openFile(self.io, file_str, .{ .mode = .read_write }) catch {
+                            const created = std.Io.Dir.cwd().createFile(self.io, file_str, .{ .truncate = false }) catch return;
                             break :blk created;
                         };
-                        file.seekFromEnd(0) catch {};
+                        // TODO: seek to end for append mode
                         break :blk file;
                     } else {
-                        break :blk std.fs.cwd().createFile(file_str, .{}) catch return;
+                        break :blk std.Io.Dir.cwd().createFile(self.io, file_str, .{}) catch return;
                     }
                 };
 
                 const key = try self.allocator.dupe(u8, file_str);
                 try self.open_output_files.put(self.allocator, key, new_file);
-                _ = new_file.write(data) catch {};
+                new_file.writeStreamingAll(self.io, data) catch {};
             }
         } else {
             try self.output.appendSlice(self.allocator, data);
@@ -671,7 +675,7 @@ pub const Evaluator = struct {
     }
 
     fn executePrint(self: *Evaluator, args: []*ast.Expression, output_file: ?*ast.Expression, append: bool, pipe_cmd: ?*ast.Expression) !void {
-        var line_output: std.ArrayListUnmanaged(u8) = .{};
+        var line_output: std.ArrayListUnmanaged(u8) = .empty;
         defer line_output.deinit(self.allocator);
 
         if (args.len == 0) {
@@ -695,7 +699,7 @@ pub const Evaluator = struct {
         const format_val = try self.evaluateExpression(format_expr);
         const format_str = try format_val.asString(self.allocator);
 
-        var printf_output: std.ArrayListUnmanaged(u8) = .{};
+        var printf_output: std.ArrayListUnmanaged(u8) = .empty;
         defer printf_output.deinit(self.allocator);
 
         // Simple printf implementation
@@ -1007,7 +1011,7 @@ pub const Evaluator = struct {
             if (new_nf < self.fields.items.len) {
                 // Truncate fields and rebuild $0
                 self.fields.items.len = new_nf;
-                var new_line = std.ArrayListUnmanaged(u8){};
+                var new_line = std.ArrayListUnmanaged(u8).empty;
                 errdefer new_line.deinit(self.allocator);
                 // safe-transpile: for with index access requires manual review
                 for (self.fields.items, 0..) |field, i| {
@@ -1155,7 +1159,7 @@ pub const Evaluator = struct {
             const format_val = try self.evaluateExpression(args[0]);
             const format_str = try format_val.asString(self.allocator);
 
-            var result: std.ArrayListUnmanaged(u8) = .{};
+            var result: std.ArrayListUnmanaged(u8) = .empty;
             errdefer result.deinit(self.allocator);
 
             var arg_idx: usize = 1;
@@ -1281,7 +1285,7 @@ pub const Evaluator = struct {
             const global = how_str.len > 0 and (how_str[0] == 'g' or how_str[0] == 'G');
             const which_match = if (!global) @as(usize, @intFromFloat(@max(0.0, how_val.asNumber()))) else 0;
 
-            var result: std.ArrayListUnmanaged(u8) = .{};
+            var result: std.ArrayListUnmanaged(u8) = .empty;
             errdefer result.deinit(self.allocator);
 
             var pos: usize = 0;
@@ -1370,7 +1374,7 @@ pub const Evaluator = struct {
 
             var target = if (target_expr) |te| try (try self.evaluateExpression(te)).asString(self.allocator) else self.current_line;
 
-            var result: std.ArrayListUnmanaged(u8) = .{};
+            var result: std.ArrayListUnmanaged(u8) = .empty;
             errdefer result.deinit(self.allocator);
 
             var pos: usize = 0;
@@ -1498,14 +1502,14 @@ pub const Evaluator = struct {
         }
 
         if (safe.SimdUtils.eql(name, "systime")) {
-            const now = std.time.timestamp();
+            const now = std.Io.Clock.real.now(self.io).toSeconds();
             return Value.initNumber(@floatFromInt(now));
         }
 
         if (safe.SimdUtils.eql(name, "strftime")) {
             // strftime([format [, timestamp]])
-            var format_str: safe.Slice(u8) = "%Y-%m-%d %H:%M:%S";
-            var timestamp: i64 = std.time.timestamp();
+            var format_str: []const u8 = "%Y-%m-%d %H:%M:%S";
+            var timestamp: i64 = std.Io.Clock.real.now(self.io).toSeconds();
             if (args.len > 0) {
                 const fmt_val = try self.evaluateExpression(args[0]);
                 format_str = try fmt_val.asString(self.allocator);
@@ -1522,7 +1526,7 @@ pub const Evaluator = struct {
             const month_day = year_day.calculateMonthDay();
             const day_secs = epoch.getDaySeconds();
 
-            var result: std.ArrayListUnmanaged(u8) = .{};
+            var result: std.ArrayListUnmanaged(u8) = .empty;
             errdefer result.deinit(self.allocator);
 
             var i: usize = 0;
@@ -1592,7 +1596,7 @@ pub const Evaluator = struct {
             const val = try self.evaluateExpression(args[0]);
             const datespec = try val.asString(self.allocator);
             // Parse "YYYY MM DD HH MM SS"
-            var parts: [6]i64 = .{};
+            var parts: [6]i64 = undefined;
             var part_idx: usize = 0;
             var iter = std.mem.splitScalar(u8, datespec, ' ');
             while (iter.next()) |part| {
@@ -1654,7 +1658,7 @@ pub const Evaluator = struct {
             const ArrayItem = struct { key: []const u8, val: Value };
 
             // Collect items from source array
-            var items = std.ArrayListUnmanaged(ArrayItem){};
+            var items = std.ArrayListUnmanaged(ArrayItem).empty;
             defer {
                 for (0..items.items.len) |__zust_i| {
                     const item = &items.items[__zust_i];
@@ -1831,7 +1835,9 @@ test "Evaluator: simple print" {
     var program = try p.parse();
     defer program.deinit();
 
-    var eval = Evaluator.init(allocator, &program.functions);
+    var env_map = std.process.Environ.Map.init(allocator);
+    defer env_map.deinit();
+    var eval = Evaluator.init(allocator, &program.functions, undefined, &env_map);
     defer eval.deinit();
 
     const output = try eval.execute(&program, "hello world", null, true);
@@ -1847,7 +1853,9 @@ test "Evaluator: arithmetic expression" {
     var program = try p.parse();
     defer program.deinit();
 
-    var eval = Evaluator.init(allocator, &program.functions);
+    var env_map2 = std.process.Environ.Map.init(allocator);
+    defer env_map2.deinit();
+    var eval = Evaluator.init(allocator, &program.functions, undefined, &env_map2);
     defer eval.deinit();
 
     const output = try eval.execute(&program, "", null, true);
@@ -1863,7 +1871,9 @@ test "Evaluator: variable assignment" {
     var program = try p.parse();
     defer program.deinit();
 
-    var eval = Evaluator.init(allocator, &program.functions);
+    var env_map3 = std.process.Environ.Map.init(allocator);
+    defer env_map3.deinit();
+    var eval = Evaluator.init(allocator, &program.functions, undefined, &env_map3);
     defer eval.deinit();
 
     const output = try eval.execute(&program, "", null, true);

@@ -111,9 +111,9 @@ pub fn processAwkRegex(
     options: AwkOptions,
     allocator: std.mem.Allocator,
 ) !AwkResult {
-    var matches: std.ArrayListUnmanaged(AwkMatchResult) = .{};
+    var matches: std.ArrayListUnmanaged(AwkMatchResult) = .empty;
     errdefer matches.deinit(allocator);
-    var fields: std.ArrayListUnmanaged(FieldInfo) = .{};
+    var fields: std.ArrayListUnmanaged(FieldInfo) = .empty;
     errdefer fields.deinit(allocator);
 
     // Compile regex pattern
@@ -420,13 +420,13 @@ pub fn findSubstitutions(
     options: AwkOptions,
     allocator: std.mem.Allocator,
 ) ![]SubstitutionResult {
-    var matches: std.ArrayListUnmanaged(SubstitutionResult) = .{};
+    var matches: std.ArrayListUnmanaged(SubstitutionResult) = .empty;
     errdefer matches.deinit(allocator);
 
     if (pattern.len == 0) return try matches.toOwnedSlice(allocator);
 
     // Pre-compute lowercase pattern if case insensitive
-    var lower_pattern_buf: [1024]u8 = .{};
+    var lower_pattern_buf: [1024]u8 = undefined;
     const search_pattern = if (options.case_insensitive and pattern.len <= 1024) blk: {
         toLowerSlice(pattern, lower_pattern_buf[0..pattern.len]);
         break :blk lower_pattern_buf[0..pattern.len];
@@ -471,7 +471,7 @@ pub fn findSubstitutionsRegex(
     options: AwkOptions,
     allocator: std.mem.Allocator,
 ) ![]SubstitutionResult {
-    var matches: std.ArrayListUnmanaged(SubstitutionResult) = .{};
+    var matches: std.ArrayListUnmanaged(SubstitutionResult) = .empty;
     errdefer matches.deinit(allocator);
 
     if (pattern.len == 0) return try matches.toOwnedSlice(allocator);

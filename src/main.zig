@@ -14,20 +14,24 @@ const ast = @import("ast.zig");
 const AwkOptions = gpu.AwkOptions;
 const isRegexPattern = regex.isRegexPattern;
 
-pub fn main() !u8 {
-    var gpa = std.heap.DebugAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !u8 {
+    const allocator = init.gpa;
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    var args_iter = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
+    defer args_iter.deinit();
+    var args: std.ArrayList([]const u8) = .empty;
+    defer args.deinit(allocator);
+    while (args_iter.next()) |arg| {
+        try args.append(allocator, arg);
+    }
+    const args_slice = args.items;
 
     // Parse arguments
     var options = AwkOptions{};
-    var pattern: safe.Slice(u8) = "";
-    var action: safe.Slice(u8) = "";
-    var replacement: safe.Slice(u8) = "";
-    var files: std.ArrayListUnmanaged([]const u8) = .{};
+    var pattern: []const u8 = "";
+    var action: []const u8 = "";
+    var replacement: []const u8 = "";
+    var files: std.ArrayListUnmanaged([]const u8) = .empty;
     defer files.deinit(allocator);
     var verbose = false;
     var backend_mode: BackendMode = .auto;
@@ -37,10 +41,10 @@ pub fn main() !u8 {
     var special_var: SpecialVar = .none;
     var allocated_fields: ?[]const u32 = null;
     // safe-transpile: free removed (memory owned by safe type);
-    var program_text: safe.Slice(u8) = ""; // Original AWK program for full parsing
+    var program_text: []const u8 = ""; // Original AWK program for full parsing
     var program_text_allocated = false;
     // safe-transpile: free removed (memory owned by safe type);
-    var variables: std.StringHashMapUnmanaged([]const u8) = .{};
+    var variables: std.StringHashMapUnmanaged([]const u8) = .empty;
     defer {
         var var_it = variables.iterator();
         while (var_it.next()) |_| {
@@ -50,21 +54,21 @@ pub fn main() !u8 {
     }
 
     var i: usize = 1;
-    while (i < args.len) : (i += 1) {
-        const arg = args[i];
+    while (i < args_slice.len) : (i += 1) {
+        const arg = args_slice[i];
 
-        if (safe.SimdUtils.eql(arg, "-F") and i + 1 < args.len) {
+        if (safe.SimdUtils.eql(arg, "-F") and i + 1 < args_slice.len) {
             i += 1;
-            options.field_separator = args[i];
+            options.field_separator = args_slice[i];
         } else if (std.mem.startsWith(u8, arg, "-F")) {
             options.field_separator = arg[2..];
         } else if (safe.SimdUtils.eql(arg, "-i")) {
             options.case_insensitive = true;
         } else if (safe.SimdUtils.eql(arg, "--invert-match")) {
             options.invert_match = true;
-        } else if (safe.SimdUtils.eql(arg, "-v") and i + 1 < args.len) {
+        } else if (safe.SimdUtils.eql(arg, "-v") and i + 1 < args_slice.len) {
             i += 1;
-            const assign = args[i];
+            const assign = args_slice[i];
             // zust: use safe.String or safe.GuardedSlice for slice operations
             if (std.mem.indexOf(u8, assign, "=")) |eq_pos| {
                 const var_name = assign[0..eq_pos];
@@ -76,15 +80,15 @@ pub fn main() !u8 {
                 std.debug.print("gawk: invalid -v assignment: {s}\n", .{assign});
                 return 2;
             }
-        } else if (safe.SimdUtils.eql(arg, "-f") and i + 1 < args.len) {
+        } else if (safe.SimdUtils.eql(arg, "-f") and i + 1 < args_slice.len) {
             i += 1;
-            const file = std.fs.cwd().openFile(args[i], .{}) catch |err| {
-                std.debug.print("gawk: {s}: {}\n", .{ args[i], err });
+            const file = std.Io.Dir.cwd().openFile(init.io, args_slice[i], .{}) catch |err| {
+                std.debug.print("gawk: {s}: {}\n", .{ args_slice[i], err });
                 return 2;
             };
-            defer file.close();
-            const content = file.readToEndAlloc(allocator, 1024 * 1024) catch |err| {
-                std.debug.print("gawk: {s}: {}\n", .{ args[i], err });
+            defer file.close(init.io);
+            const content = readFileToEndAlloc(file, init.io, allocator, 1024 * 1024) catch |err| {
+                std.debug.print("gawk: {s}: {}\n", .{ args_slice[i], err });
                 return 2;
             };
             // safe-transpile: free removed (memory owned by safe type);
@@ -98,21 +102,21 @@ pub fn main() !u8 {
                 program_text = try allocator.dupe(u8, content);
                 program_text_allocated = true;
             }
-        } else if (safe.SimdUtils.eql(arg, "-e") and i + 1 < args.len) {
+        } else if (safe.SimdUtils.eql(arg, "-e") and i + 1 < args_slice.len) {
             i += 1;
             if (program_text.len > 0) {
-                const combined = try std.mem.concat(allocator, u8, &.{ program_text, "\n", args[i] });
+                const combined = try std.mem.concat(allocator, u8, &.{ program_text, "\n", args_slice[i] });
                 if (program_text_allocated) // safe-transpile: free removed (memory owned by safe type);
                     program_text = combined;
                 program_text_allocated = true;
             } else {
-                program_text = try allocator.dupe(u8, args[i]);
+                program_text = try allocator.dupe(u8, args_slice[i]);
                 program_text_allocated = true;
             }
-        } else if (safe.SimdUtils.eql(arg, "--assign") and i + 1 < args.len) {
+        } else if (safe.SimdUtils.eql(arg, "--assign") and i + 1 < args_slice.len) {
             // --assign is an alias for -v
             i += 1;
-            const assign = args[i];
+            const assign = args_slice[i];
             // zust: use safe.String or safe.GuardedSlice for slice operations
             if (std.mem.indexOf(u8, assign, "=")) |eq_pos| {
                 const var_name = assign[0..eq_pos];
@@ -125,7 +129,7 @@ pub fn main() !u8 {
                 return 2;
             }
         } else if (safe.SimdUtils.eql(arg, "--version")) {
-            _ = std.posix.write(std.posix.STDOUT_FILENO, "gawk (e-jerk GPU-accelerated) 1.0\n") catch {};
+            std.Io.File.stdout().writeStreamingAll(init.io, "gawk (e-jerk GPU-accelerated) 1.0\n") catch {};
             return 0;
         } else if (safe.SimdUtils.eql(arg, "--traditional") or safe.SimdUtils.eql(arg, "-c")) {
             options.traditional_mode = true;
@@ -137,9 +141,9 @@ pub fn main() !u8 {
             options.dump_variables = true;
         } else if (safe.SimdUtils.eql(arg, "--profile")) {
             options.profile_mode = true;
-        } else if (safe.SimdUtils.eql(arg, "-W") and i + 1 < args.len) {
+        } else if (safe.SimdUtils.eql(arg, "-W") and i + 1 < args_slice.len) {
             i += 1;
-            const w_arg = args[i];
+            const w_arg = args_slice[i];
             if (safe.SimdUtils.eql(w_arg, "traditional")) {
                 options.traditional_mode = true;
             } else if (safe.SimdUtils.eql(w_arg, "posix")) {
@@ -151,7 +155,7 @@ pub fn main() !u8 {
             } else if (safe.SimdUtils.eql(w_arg, "profile")) {
                 options.profile_mode = true;
             } else if (safe.SimdUtils.eql(w_arg, "version")) {
-                _ = std.posix.write(std.posix.STDOUT_FILENO, "gawk (e-jerk GPU-accelerated) 1.0\n") catch {};
+                std.Io.File.stdout().writeStreamingAll(init.io, "gawk (e-jerk GPU-accelerated) 1.0\n") catch {};
                 return 0;
             } else if (std.mem.startsWith(u8, w_arg, "dump-variables=")) {
                 options.dump_variables = true;
@@ -163,9 +167,9 @@ pub fn main() !u8 {
             }
         } else if (safe.SimdUtils.eql(arg, "--verbose")) {
             verbose = true;
-        } else if (safe.SimdUtils.eql(arg, "--backend") and i + 1 < args.len) {
+        } else if (safe.SimdUtils.eql(arg, "--backend") and i + 1 < args_slice.len) {
             i += 1;
-            backend_mode = parseBackendMode(args[i]);
+            backend_mode = parseBackendMode(args_slice[i]);
         } else if (safe.SimdUtils.eql(arg, "--cpu")) {
             backend_mode = .cpu;
         } else if (safe.SimdUtils.eql(arg, "--gnu")) {
@@ -228,40 +232,45 @@ pub fn main() !u8 {
     }
 
     // Read input
-    var text: safe.Slice(u8) = .{};
+    var text: []u8 = &[_]u8{};
 
     if (files.items.len > 0) {
         // Read from files
         var total_size: usize = 0;
         for (files.items) |path| {
-            const file = std.fs.cwd().openFile(path, .{}) catch |err| {
+            const file = std.Io.Dir.cwd().openFile(init.io, path, .{}) catch |err| {
                 std.debug.print("gawk: {s}: {}\n", .{ path, err });
                 return 2;
             };
-            defer file.close();
-            const stat = try file.stat();
+            defer file.close(init.io);
+            const stat = try file.stat(init.io);
             total_size += stat.size;
         }
 
         text = try allocator.alloc(u8, total_size);
         var offset: usize = 0;
         for (files.items) |path| {
-            const file = try std.fs.cwd().openFile(path, .{});
-            defer file.close();
-            const bytes_read = try file.readAll(text[offset..]);
+            const file = try std.Io.Dir.cwd().openFile(init.io, path, .{});
+            defer file.close(init.io);
+            var bytes_read: usize = 0;
+            while (bytes_read < total_size - offset) {
+                const n = try file.readStreaming(init.io, &.{text[offset + bytes_read..]});
+                if (n == 0) break;
+                bytes_read += n;
+            }
             offset += bytes_read;
         }
     } else {
         // Read from stdin
-        var stdin_list: std.ArrayListUnmanaged(u8) = .{};
+        var stdin_list: std.ArrayListUnmanaged(u8) = .empty;
         defer stdin_list.deinit(allocator);
-        var buf: [4096]u8 = .{};
+        var buf: [4096]u8 = undefined;
         var __zust_loop_counter: u64 = 0;
         while (true) {
             __zust_loop_counter += 1;
             if (__zust_loop_counter > 1_000_000) return error.InfiniteLoop;
 
-            const bytes_read = std.posix.read(std.posix.STDIN_FILENO, &buf) catch |err| {
+            const bytes_read = std.Io.File.stdin().readStreaming(init.io, &.{&buf}) catch |err| {
                 if (err == error.WouldBlock) continue;
                 std.debug.print("gawk: error reading stdin: {}\n", .{err});
                 return 2;
@@ -278,7 +287,7 @@ pub fn main() !u8 {
         // Try GPU bytecode VM first for full feature parity
         if (executeFullAwkGpu(program_text, text, options, backend_mode, verbose, allocator)) |output| {
             // safe-transpile: free removed (memory owned by safe type);
-            _ = std.posix.write(std.posix.STDOUT_FILENO, output) catch {};
+            std.Io.File.stdout().writeStreamingAll(init.io, output) catch {};
             return 0;
         } else |_| {
             // Fall back to CPU evaluator with per-file processing
@@ -290,7 +299,7 @@ pub fn main() !u8 {
                 return 1;
             };
             defer program.deinit();
-            var eval = evaluator.Evaluator.init(allocator, &program.functions);
+            var eval = evaluator.Evaluator.init(allocator, &program.functions, init.io, init.environ_map);
             defer eval.deinit();
             if (!safe.SimdUtils.eql(options.field_separator, " \t")) {
                 eval.field_separator = options.field_separator;
@@ -316,7 +325,7 @@ pub fn main() !u8 {
             if (files.items.len > 0) {
                 // safe-transpile: for with index access requires manual review
                 for (files.items, 0..) |path, file_idx| {
-                    const file_text = readFileToString(allocator, path) catch |err| {
+                    const file_text = readFileToString(allocator, path, init.io) catch |err| {
                         std.debug.print("gawk: {s}: {}\n", .{ path, err });
                         continue;
                     };
@@ -327,7 +336,7 @@ pub fn main() !u8 {
                         return 1;
                     };
                     // safe-transpile: free removed (memory owned by safe type);
-                    _ = std.posix.write(std.posix.STDOUT_FILENO, output) catch {};
+                    std.Io.File.stdout().writeStreamingAll(init.io, output) catch {};
                     // Check if nextfile was requested; if so, continue to next file
                     // (eval.execute already breaks on next_file, so we just continue)
                 }
@@ -337,7 +346,7 @@ pub fn main() !u8 {
                     return 1;
                 };
                 // safe-transpile: free removed (memory owned by safe type);
-                _ = std.posix.write(std.posix.STDOUT_FILENO, output) catch {};
+                std.Io.File.stdout().writeStreamingAll(init.io, output) catch {};
             }
             return 0;
         }
@@ -356,7 +365,7 @@ pub fn main() !u8 {
             const result_text = try cpu.applySubstitutionsRegex(text, subs_to_apply, replacement, allocator);
             // safe-transpile: free removed (memory owned by safe type);
 
-            _ = std.posix.write(std.posix.STDOUT_FILENO, result_text) catch {};
+            std.Io.File.stdout().writeStreamingAll(init.io, result_text) catch {};
         } else {
             const substitutions = try cpu.findSubstitutions(text, pattern, options, allocator);
             // safe-transpile: free removed (memory owned by safe type);
@@ -365,7 +374,7 @@ pub fn main() !u8 {
             const result_text = try cpu.applySubstitutions(text, subs_to_apply, pattern.len, replacement, allocator);
             // safe-transpile: free removed (memory owned by safe type);
 
-            _ = std.posix.write(std.posix.STDOUT_FILENO, result_text) catch {};
+            std.Io.File.stdout().writeStreamingAll(init.io, result_text) catch {};
         }
         return 0;
     }
@@ -445,19 +454,19 @@ pub fn main() !u8 {
 
         // Handle special variables NR and NF
         if (special_var != .none) {
-            var buf: [32]u8 = .{};
+            var buf: [32]u8 = undefined;
             const value = switch (special_var) {
                 .nr => match.line_num + 1, // AWK line numbers are 1-indexed
                 .nf => match.field_count,
                 .none => unreachable,
             };
             const str = std.fmt.bufPrint(&buf, "{d}", .{value}) catch "0";
-            _ = std.posix.write(std.posix.STDOUT_FILENO, str) catch {};
-            _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
+            std.Io.File.stdout().writeStreamingAll(init.io, str) catch {};
+            std.Io.File.stdout().writeStreamingAll(init.io, "\n") catch {};
         } else if (builtin_call) |bc| {
             // Apply built-in function
             // Find the specified field
-            var field_text: safe.Slice(u8) = line; // Default to whole line if $0
+            var field_text: []const u8 = line; // Default to whole line if $0
             if (bc.field_num > 0) {
                 for (result.fields) |field| {
                     // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
@@ -473,9 +482,9 @@ pub fn main() !u8 {
             // Apply the function
             switch (bc.func) {
                 .length => {
-                    var buf: [32]u8 = .{};
+                    var buf: [32]u8 = undefined;
                     const len_str = std.fmt.bufPrint(&buf, "{d}", .{field_text.len}) catch "0";
-                    _ = std.posix.write(std.posix.STDOUT_FILENO, len_str) catch {};
+                    std.Io.File.stdout().writeStreamingAll(init.io, len_str) catch {};
                 },
                 .substr => {
                     // AWK substr is 1-indexed
@@ -485,39 +494,39 @@ pub fn main() !u8 {
                         const max_len = field_text.len - start;
                         // safe-transpile: @intCast requires manual review — consider safe.CheckedInt(T).init(@intCast)
                         const len: usize = if (bc.arg2 >= 0) @min(@as(usize, @intCast(bc.arg2)), max_len) else max_len;
-                        _ = std.posix.write(std.posix.STDOUT_FILENO, field_text[start..][0..len]) catch {};
+                        std.Io.File.stdout().writeStreamingAll(init.io, field_text[start..][0..len]) catch {};
                     }
                 },
                 .index_fn => {
-                    var buf: [32]u8 = .{};
+                    var buf: [32]u8 = undefined;
                     // zust: use safe.String or safe.GuardedSlice for slice operations
                     const pos: usize = if (std.mem.indexOf(u8, field_text, bc.string_arg)) |p| p + 1 else 0;
                     const pos_str = std.fmt.bufPrint(&buf, "{d}", .{pos}) catch "0";
-                    _ = std.posix.write(std.posix.STDOUT_FILENO, pos_str) catch {};
+                    std.Io.File.stdout().writeStreamingAll(init.io, pos_str) catch {};
                 },
                 .toupper => {
-                    var upper_buf: [4096]u8 = .{};
+                    var upper_buf: [4096]u8 = undefined;
                     const out_len = @min(field_text.len, upper_buf.len);
                     // safe-transpile: for with index access requires manual review
                     for (field_text[0..out_len], 0..) |c, idx| {
                         upper_buf[idx] = if (c >= 'a' and c <= 'z') c - 32 else c;
                     }
-                    _ = std.posix.write(std.posix.STDOUT_FILENO, upper_buf[0..out_len]) catch {};
+                    std.Io.File.stdout().writeStreamingAll(init.io, upper_buf[0..out_len]) catch {};
                 },
                 .tolower => {
-                    var lower_buf: [4096]u8 = .{};
+                    var lower_buf: [4096]u8 = undefined;
                     const out_len = @min(field_text.len, lower_buf.len);
                     // safe-transpile: for with index access requires manual review
                     for (field_text[0..out_len], 0..) |c, idx| {
                         lower_buf[idx] = if (c >= 'A' and c <= 'Z') c + 32 else c;
                     }
-                    _ = std.posix.write(std.posix.STDOUT_FILENO, lower_buf[0..out_len]) catch {};
+                    std.Io.File.stdout().writeStreamingAll(init.io, lower_buf[0..out_len]) catch {};
                 },
                 .none => {
-                    _ = std.posix.write(std.posix.STDOUT_FILENO, field_text) catch {};
+                    std.Io.File.stdout().writeStreamingAll(init.io, field_text) catch {};
                 },
             }
-            _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
+            std.Io.File.stdout().writeStreamingAll(init.io, "\n") catch {};
         } else if (options.requested_fields.len > 0) {
             // Print specific fields
             var first = true;
@@ -528,19 +537,19 @@ pub fn main() !u8 {
                     if (field.line_idx == @as(u32, @intCast(match_idx)) and
                         field.field_idx == field_num)
                     {
-                        if (!first) _ = std.posix.write(std.posix.STDOUT_FILENO, options.output_field_separator) catch {};
+                        if (!first) std.Io.File.stdout().writeStreamingAll(init.io, options.output_field_separator) catch {};
                         first = false;
                         const field_text = line[field.start_offset..field.end_offset];
-                        _ = std.posix.write(std.posix.STDOUT_FILENO, field_text) catch {};
+                        std.Io.File.stdout().writeStreamingAll(init.io, field_text) catch {};
                         break;
                     }
                 }
             }
-            _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
+            std.Io.File.stdout().writeStreamingAll(init.io, "\n") catch {};
         } else {
             // Print whole line
-            _ = std.posix.write(std.posix.STDOUT_FILENO, line) catch {};
-            _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
+            std.Io.File.stdout().writeStreamingAll(init.io, line) catch {};
+            std.Io.File.stdout().writeStreamingAll(init.io, "\n") catch {};
         }
     }
 
@@ -751,7 +760,7 @@ fn parseAwkProgram(program: []const u8, allocator: std.mem.Allocator, options: *
         // Check for print $N (if no builtin function and no special var)
         // zust: use safe.String or safe.GuardedSlice for slice operations
         if (result.builtin == null and result.special_var == .none and std.mem.indexOf(u8, action, "print") != null) {
-            var fields_list: std.ArrayListUnmanaged(u32) = .{};
+            var fields_list: std.ArrayListUnmanaged(u32) = .empty;
 
             var j: usize = 0;
             while (j < action.len) {
@@ -1069,14 +1078,38 @@ fn needsFullParser(program: []const u8) bool {
 /// Execute a complex AWK program using the full parser/evaluator
 // safe-transpile: function uses raw slice parameter — consider safe.String
 // safe-transpile: function returns small constant slice — consider safe.String
-fn readFileToString(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    const file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
-    const stat = try file.stat();
+fn readFileToEndAlloc(file: std.Io.File, io: std.Io, allocator: std.mem.Allocator, max_size: usize) ![]u8 {
+    const stat = try file.stat(io);
+    const size = @min(stat.size, max_size);
+    const buf = try allocator.alloc(u8, size);
+    errdefer allocator.free(buf);
+    var total_read: usize = 0;
+    while (total_read < size) {
+        const n = try file.readStreaming(io, &.{buf[total_read..]});
+        if (n == 0) break;
+        total_read += n;
+    }
+    if (total_read < size) {
+        const trimmed = try allocator.realloc(buf, total_read);
+        return trimmed;
+    }
+    return buf;
+}
+
+fn readFileToString(allocator: std.mem.Allocator, path: []const u8, io: std.Io) ![]u8 {
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    const stat = try file.stat(io);
     const buf = try allocator.alloc(u8, stat.size);
-    const bytes_read = try file.readAll(buf);
-    if (bytes_read < stat.size) {
-        return buf[0..bytes_read];
+    errdefer allocator.free(buf);
+    var total_read: usize = 0;
+    while (total_read < stat.size) {
+        const n = try file.readStreaming(io, &.{buf[total_read..]});
+        if (n == 0) break;
+        total_read += n;
+    }
+    if (total_read < stat.size) {
+        return buf[0..total_read];
     }
     return buf;
 }

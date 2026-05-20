@@ -20,6 +20,7 @@ pub const ParseError = error{
     UnexpectedCharacter,
     TooManyArguments,
     OutOfMemory,
+    InfiniteLoop,
 };
 
 // ============================================================================
@@ -430,7 +431,7 @@ pub const Parser = struct {
         };
         errdefer program.deinit();
 
-        var rules = std.ArrayListUnmanaged(ast.Rule){};
+        var rules = std.ArrayListUnmanaged(ast.Rule).empty;
         defer rules.deinit(self.allocator);
 
         while (!self.check(.eof)) {
@@ -497,7 +498,7 @@ pub const Parser = struct {
         try self.consume(.lbrace, "Expected '{' before action");
         self.skipNewlines();
 
-        var stmts = std.ArrayListUnmanaged(ast.Statement){};
+        var stmts = std.ArrayListUnmanaged(ast.Statement).empty;
         defer stmts.deinit(self.allocator);
 
         while (!self.check(.rbrace) and !self.check(.eof)) {
@@ -520,7 +521,7 @@ pub const Parser = struct {
 
         try self.consume(.lparen, "Expected '(' after function name");
 
-        var params = std.ArrayListUnmanaged([]const u8){};
+        var params = std.ArrayListUnmanaged([]const u8).empty;
         defer params.deinit(self.allocator);
 
         if (!self.check(.rparen)) {
@@ -792,7 +793,7 @@ pub const Parser = struct {
                     .true_expr = true_expr,
                     .false_expr = false_expr,
                 } } };
-                expr = result;
+                expr = result.ptr;
             } else if (self.match(.pipepipe)) {
                 const right = try self.parseConcatenation();
                 expr = try ast.Expression.binaryOp(self.allocator, .@"or", expr, right);
@@ -810,7 +811,7 @@ pub const Parser = struct {
                     .pattern = pattern,
                     .negated = negated,
                 } } };
-                expr = result;
+                expr = result.ptr;
             } else {
                 break;
             }
@@ -822,7 +823,7 @@ pub const Parser = struct {
     fn parsePrint(self: *Parser) ParseError!*ast.Statement {
         self.advance(); // consume 'print'
 
-        var args = std.ArrayListUnmanaged(*ast.Expression){};
+        var args = std.ArrayListUnmanaged(*ast.Expression).empty;
         defer args.deinit(self.allocator);
 
         // Parse print arguments
@@ -869,7 +870,7 @@ pub const Parser = struct {
 
         const format = try self.parsePrintExpression();
 
-        var args = std.ArrayListUnmanaged(*ast.Expression){};
+        var args = std.ArrayListUnmanaged(*ast.Expression).empty;
         defer args.deinit(self.allocator);
 
         while (self.match(.comma)) {
@@ -1044,7 +1045,7 @@ pub const Parser = struct {
                 .pattern = pattern,
                 .negated = negated,
             } } };
-            expr = result;
+            expr = result.ptr;
         }
 
         return expr;
@@ -1085,7 +1086,7 @@ pub const Parser = struct {
                 .left = expr,
                 .right = right,
             } } };
-            expr = result;
+            expr = result.ptr;
         }
 
         return expr;
@@ -1196,7 +1197,7 @@ pub const Parser = struct {
                     .operand = expr,
                     .prefix = false,
                 } } };
-                expr = result;
+                expr = result.ptr;
             } else if (self.match(.minusminus)) {
                 const result = try safe.Box(ast.Expression).init(self.allocator, undefined);
                 result.ptr.* = .{ .kind = .{ .unary_op = .{
@@ -1204,7 +1205,7 @@ pub const Parser = struct {
                     .operand = expr,
                     .prefix = false,
                 } } };
-                expr = result;
+                expr = result.ptr;
             } else if (self.match(.lbracket)) {
                 // Array subscript
                 const index = try self.parseExpression();
@@ -1219,7 +1220,7 @@ pub const Parser = struct {
                             .array = name,
                             .index = index,
                         } } };
-                        expr = result;
+            expr = result.ptr;
                     },
                     else => return ParseError.UnexpectedToken,
                 }
@@ -1312,8 +1313,8 @@ pub const Parser = struct {
 
             // Check for function call
             if (self.match(.lparen)) {
-                var args = std.ArrayListUnmanaged(*ast.Expression){};
-                defer args.deinit(self.allocator);
+        var args = std.ArrayListUnmanaged(*ast.Expression).empty;
+        defer args.deinit(self.allocator);
 
                 if (!self.check(.rparen)) {
                     var __zust_loop_counter: u64 = 0;

@@ -338,9 +338,9 @@ pub const MetalAwk = struct {
         defer gpu_regex.deinit();
 
         // Find line boundaries
-        var line_offsets: std.ArrayListUnmanaged(u32) = .{};
+        var line_offsets: std.ArrayListUnmanaged(u32) = .empty;
         defer line_offsets.deinit(allocator);
-        var line_lengths: std.ArrayListUnmanaged(u32) = .{};
+        var line_lengths: std.ArrayListUnmanaged(u32) = .empty;
         defer line_lengths.deinit(allocator);
 
         var line_start: usize = 0;
@@ -440,7 +440,7 @@ pub const MetalAwk = struct {
         defer counters_buffer.release();
         const counters_ptr: *u32 = // safe-transpile: @ptrCast requires manual review — add @alignCast if alignment is guaranteed
             @ptrCast(@alignCast(counters_buffer.contents()));
-        counters_ptr[0] = 0;
+        counters_ptr.* = 0;
 
         // Create line offsets/lengths buffers
         var line_offsets_buffer = self.device.newBufferWithLengthOptions(line_offsets.items.len * @sizeOf(u32), mtl.MTLResourceOptions.MTLResourceCPUCacheModeDefaultCache) orelse return error.BufferCreationFailed;
@@ -490,7 +490,7 @@ pub const MetalAwk = struct {
         }
 
         // Do field splitting on CPU
-        var fields: std.ArrayListUnmanaged(FieldInfo) = .{};
+        var fields: std.ArrayListUnmanaged(FieldInfo) = .empty;
         // safe-transpile: for with index access requires manual review
         for (matches, 0..) |*match, idx| {
             const line = text[match.line_start..match.line_end];
@@ -561,9 +561,9 @@ pub const MetalAwk = struct {
         if (text.len > MAX_GPU_BUFFER_SIZE) return error.TextTooLarge;
 
         // Find line boundaries
-        var line_offsets: std.ArrayListUnmanaged(u32) = .{};
+        var line_offsets: std.ArrayListUnmanaged(u32) = .empty;
         defer line_offsets.deinit(allocator);
-        var line_lengths: std.ArrayListUnmanaged(u32) = .{};
+        var line_lengths: std.ArrayListUnmanaged(u32) = .empty;
         defer line_lengths.deinit(allocator);
 
         var line_start: usize = 0;
