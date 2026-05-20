@@ -37,8 +37,7 @@ pub const Program = struct {
             if (rule.pattern) |p| p.deinit(self.allocator);
             rule.action.deinit(self.allocator);
         }
-        if (self.rules.len > 0) // safe-transpile: free removed (memory owned by safe type);
-            if (self.endfile) |ef| ef.deinit(self.allocator);
+        if (self.endfile) |ef| ef.deinit(self.allocator);
         if (self.end) |e| e.deinit(self.allocator);
 
         var it = self.functions.iterator();
