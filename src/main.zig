@@ -95,8 +95,10 @@ pub fn main(init: std.process.Init) !u8 {
             // Concatenate to program_text
             if (program_text.len > 0) {
                 const combined = try std.mem.concat(allocator, u8, &.{ program_text, "\n", content });
-                if (program_text_allocated) // safe-transpile: free removed (memory owned by safe type);
-                    program_text = combined;
+                if (program_text_allocated) {
+                    // safe-transpile: free removed (memory owned by safe type);
+                }
+                program_text = combined;
                 program_text_allocated = true;
             } else {
                 program_text = try allocator.dupe(u8, content);
@@ -106,8 +108,10 @@ pub fn main(init: std.process.Init) !u8 {
             i += 1;
             if (program_text.len > 0) {
                 const combined = try std.mem.concat(allocator, u8, &.{ program_text, "\n", args_slice[i] });
-                if (program_text_allocated) // safe-transpile: free removed (memory owned by safe type);
-                    program_text = combined;
+                if (program_text_allocated) {
+                    // safe-transpile: free removed (memory owned by safe type);
+                }
+                program_text = combined;
                 program_text_allocated = true;
             } else {
                 program_text = try allocator.dupe(u8, args_slice[i]);
@@ -189,8 +193,10 @@ pub fn main(init: std.process.Init) !u8 {
             if (program_text.len > 0) {
                 try files.append(allocator, arg);
             } else if (pattern.len == 0 and action.len == 0) {
-                if (program_text_allocated) // safe-transpile: free removed (memory owned by safe type);
-                    program_text = arg; // Save original program for full parsing
+                if (program_text_allocated) {
+                    // safe-transpile: free removed (memory owned by safe type);
+                }
+                program_text = arg; // Save original program for full parsing
                 program_text_allocated = false;
                 // Parse AWK program: /pattern/ or /pattern/ {action} or {action}
                 const parsed = try parseAwkProgram(arg, allocator, &options);
@@ -272,6 +278,7 @@ pub fn main(init: std.process.Init) !u8 {
 
             const bytes_read = std.Io.File.stdin().readStreaming(init.io, &.{&buf}) catch |err| {
                 if (err == error.WouldBlock) continue;
+                if (err == error.EndOfStream) break;
                 std.debug.print("gawk: error reading stdin: {}\n", .{err});
                 return 2;
             };
@@ -647,12 +654,20 @@ const ParsedProgram = struct {
 
 // safe-transpile: function uses raw slice parameter — consider safe.String
 fn parseAwkProgram(program: []const u8, allocator: std.mem.Allocator, options: *AwkOptions) !ParsedProgram {
-    _ = options;
     var result = ParsedProgram.init();
     var i: usize = 0;
 
     // Skip whitespace
     while (i < program.len and (program[i] == ' ' or program[i] == '\t')) i += 1;
+
+    // Check for negated pattern: !/pattern/
+    var is_negated = false;
+    if (i < program.len and program[i] == '!') {
+        is_negated = true;
+        i += 1;
+        // Skip whitespace after !
+        while (i < program.len and (program[i] == ' ' or program[i] == '\t')) i += 1;
+    }
 
     // Check for pattern: /pattern/
     if (i < program.len and program[i] == '/') {
@@ -661,6 +676,9 @@ fn parseAwkProgram(program: []const u8, allocator: std.mem.Allocator, options: *
         while (i < program.len and program[i] != '/') i += 1;
         result.pattern = program[pattern_start..i];
         if (i < program.len) i += 1; // Skip closing /
+        if (is_negated) {
+            options.invert_match = true;
+        }
     }
 
     // Skip whitespace

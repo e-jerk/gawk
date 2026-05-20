@@ -262,11 +262,11 @@ pub const Evaluator = struct {
             }
         }
 
-        for (records.items) |line| {
+        for (records.items, 0..) |line, idx| {
             // Skip trailing empty record from final RS
             if (line.len == 0) {
                 // Only skip if it's the very last record and input ended with RS
-                const is_last = (&line[0] == &records.items[records.items.len - 1][0]);
+                const is_last = idx == records.items.len - 1;
                 if (is_last and (input.len == 0 or input[input.len - 1] == self.rs[0])) continue;
             }
             self.nr += 1;

@@ -79,8 +79,8 @@ if [ -n "$ACTUAL" ] && echo "$ACTUAL" | grep -qi "root"; then pass; else skip; f
 # Test 3: Invert match
 echo -n "Test 3: Invert match '!/root/'... "
 EXPECTED=$($AWK '!/root/' "$TMPDIR/passwd.txt")
-ACTUAL=$($GAWK '!/root/' "$TMPDIR/passwd.txt" 2>/dev/null || $GAWK -v '/root/' "$TMPDIR/passwd.txt")
-if [ "$EXPECTED" = "$ACTUAL" ]; then pass; else skip; fi
+ACTUAL=$($GAWK '!/root/' "$TMPDIR/passwd.txt")
+if [ "$EXPECTED" = "$ACTUAL" ]; then pass; else fail; fi
 
 # Test 4: Field separator -F:
 echo -n "Test 4: Field separator -F: '{print \$1}'... "
